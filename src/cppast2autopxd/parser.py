@@ -196,6 +196,13 @@ class _Lowering:
             if kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
                 if cursor.is_definition() and self._name_selected(cursor.spelling):
                     self._add(namespace, self._lower_class(cursor, template=False))
+            elif kind == CursorKind.UNION_DECL:
+                if (
+                    cursor.is_definition()
+                    and not cursor.is_anonymous()
+                    and self._name_selected(cursor.spelling)
+                ):
+                    self._add(namespace, self._lower_union(cursor))
             elif kind == CursorKind.CLASS_TEMPLATE:
                 if cursor.is_definition() and self._name_selected(cursor.spelling):
                     self._add(namespace, self._lower_class(cursor, template=True))
@@ -227,8 +234,13 @@ class _Lowering:
                     f"alias template {cursor.spelling!r} "
                     "(not declarable in Cython pxd)"
                 )
-            # UNEXPOSED_DECL (extern "C" blocks) -> recurse transparently.
-            elif kind == CursorKind.UNEXPOSED_DECL:
+            # extern "C" / extern "C++" blocks -> recurse transparently.
+            # Modern libclang reports them as LINKAGE_SPEC; UNEXPOSED_DECL is
+            # kept for older bindings.
+            elif kind in (
+                CursorKind.UNEXPOSED_DECL,
+                getattr(CursorKind, "LINKAGE_SPEC", CursorKind.UNEXPOSED_DECL),
+            ):
                 self.visit_children(cursor, namespace)
         except _SkipEntity as skip:
             self.module.warnings.append(f"skipped: {skip.reason}")
@@ -242,6 +254,16 @@ class _Lowering:
         cls = ir.Class(name=cursor.spelling)
         self.declared.add(cursor.spelling)
         has_members = False
+
+        # Records that are the *type of a named field* (``union {...} u;``)
+        # must not be flattened into the parent — their members live behind
+        # the field name in C++.  Truly anonymous members have no such
+        # sibling FIELD_DECL.
+        field_type_hashes = {
+            ch.type.get_declaration().hash
+            for ch in cursor.get_children()
+            if ch.kind == CursorKind.FIELD_DECL
+        }
 
         for child in cursor.get_children():
             kind = child.kind
@@ -274,7 +296,14 @@ class _Lowering:
                 elif kind in (CursorKind.UNION_DECL, CursorKind.STRUCT_DECL) and (
                     child.is_anonymous()
                 ):
-                    self._flatten_anonymous(child, cls)
+                    if child.hash in field_type_hashes:
+                        raise _SkipEntity(
+                            "unnamed record typing a named field "
+                            "(not declarable in Cython)"
+                        )
+                    self._flatten_anonymous(child, cls, field_type_hashes)
+                elif kind == CursorKind.UNION_DECL and child.is_definition():
+                    cls.nested_classes.append(self._lower_union(child))
                 elif kind == CursorKind.CXX_METHOD:
                     method = self._lower_method(child)
                     if method is not None:
@@ -308,12 +337,35 @@ class _Lowering:
 
         has_members = has_members or bool(
             cls.methods or cls.constructors or cls.bases or cls.template_params
-            or cls.typedefs or cls.nested_classes
+            or cls.typedefs or cls.nested_classes or cls.enums
         )
         cls.is_pod_struct = (
             cursor.kind == CursorKind.STRUCT_DECL and not template and not has_members
         )
         return cls
+
+    def _lower_union(self, cursor) -> ir.Class:
+        """Lower a NAMED union to a fields-only ``cdef union`` declaration."""
+        union = ir.Class(name=cursor.spelling, is_union=True)
+        self.declared.add(cursor.spelling)
+        for child in cursor.get_children():
+            if child.kind != CursorKind.FIELD_DECL:
+                if child.kind in (
+                    CursorKind.CXX_METHOD,
+                    CursorKind.CONSTRUCTOR,
+                ):
+                    self.module.warnings.append(
+                        f"union {cursor.spelling}: skipped member "
+                        f"{child.spelling!r} (Cython unions hold fields only)"
+                    )
+                continue
+            try:
+                self._lower_field(child, union)
+            except UnsupportedTypeError as err:
+                self.module.warnings.append(
+                    f"union {cursor.spelling}.{child.spelling}: skipped ({err})"
+                )
+        return union
 
     def _lower_field(self, cursor, cls: ir.Class) -> None:
         ftype = cursor.type
@@ -331,12 +383,34 @@ class _Lowering:
             )
         )
 
-    def _flatten_anonymous(self, cursor, cls: ir.Class) -> None:
-        """Flatten fields of an anonymous union/struct into the parent."""
+    def _flatten_anonymous(self, cursor, cls: ir.Class, _parent_hashes=None) -> None:
+        """Flatten fields of an anonymous union/struct into the parent.
+
+        Records that type a named field at THIS level are not flattened
+        (their members are only reachable through the field name in C++).
+        """
+        field_type_hashes = {
+            ch.type.get_declaration().hash
+            for ch in cursor.get_children()
+            if ch.kind == CursorKind.FIELD_DECL
+        }
         for child in cursor.get_children():
             if child.kind == CursorKind.FIELD_DECL:
-                self._lower_field(child, cls)
+                try:
+                    self._lower_field(child, cls)
+                except UnsupportedTypeError as err:
+                    self.module.warnings.append(
+                        f"{cls.name}.{child.spelling}: skipped ({err})"
+                    )
             elif child.kind in (CursorKind.UNION_DECL, CursorKind.STRUCT_DECL):
+                if not child.is_anonymous():
+                    continue
+                if child.hash in field_type_hashes:
+                    self.module.warnings.append(
+                        f"{cls.name}: skipped unnamed record typing a named "
+                        "field (not declarable in Cython)"
+                    )
+                    continue
                 self._flatten_anonymous(child, cls)
 
     def _lower_method(self, cursor) -> Optional[ir.Method]:
@@ -381,8 +455,13 @@ class _Lowering:
     def _lower_params(self, cursor) -> List[ir.Param]:
         params = []
         for arg in cursor.get_arguments():
+            # A real default argument introduces a top-level '=' token in the
+            # parameter declaration.  Expression *children* alone are not
+            # evidence: array dimensions (float mat[16]) and non-type
+            # template arguments (Histogram<32>) also appear as expression
+            # children and must not fabricate overloads.
             has_default = any(
-                child.kind.is_expression() for child in arg.get_children()
+                tok.spelling == "=" for tok in arg.get_tokens()
             )
             atype = arg.type
             dims = 0
@@ -400,9 +479,15 @@ class _Lowering:
         return params
 
     def _lower_enum(self, cursor) -> ir.Enum:
-        self.declared.add(cursor.spelling)
+        # Anonymous enums must not leak libclang's "(unnamed enum at ...)"
+        # placeholder; an empty name renders as `cdef enum:` / `enum:`.
+        name = cursor.spelling
+        if cursor.is_anonymous() or name.startswith("("):
+            name = ""
+        else:
+            self.declared.add(name)
         enum = ir.Enum(
-            name=cursor.spelling,
+            name=name,
             is_scoped=getattr(cursor, "is_scoped_enum", lambda: False)(),
         )
         for child in cursor.get_children():

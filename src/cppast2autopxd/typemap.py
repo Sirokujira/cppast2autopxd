@@ -20,6 +20,10 @@ class UnsupportedTypeError(Exception):
     """Raised when a type cannot be expressed in Cython."""
 
 
+#: Non-type template arguments: integer/char/bool literals (with suffixes).
+_NONTYPE_ARG_RE = re.compile(r"[+-]?\d+[uUlL]*|true|false|'[^']*'")
+
+
 #: Known std:: (and compatible) templates: cython name, cimport line, and how
 #: many leading template arguments to keep (allocator/comparator/hash tails
 #: are defaulted in C++ and must be dropped for the libcpp declarations).
@@ -53,16 +57,18 @@ _STD_TEMPLATES: Dict[str, Tuple[str, str, int]] = {
     "boost::shared_ptr": ("shared_ptr", "from libcpp.memory cimport shared_ptr", 1),
 }
 
-#: Non-template std types.
+#: Non-template std types.  NOTE: std::ostream/std::istream are deliberately
+#: absent — Cython ships no libcpp.iostream, so they fall through to the
+#: unmapped-qualified-name error (skip-with-warning at the parser level);
+#: users can map them via [typemap.substitutions] to a pxd they provide.
 _STD_SIMPLE: Dict[str, Tuple[str, Optional[str]]] = {
     "std::string": ("string", "from libcpp.string cimport string"),
     "std::size_t": ("size_t", None),
     "size_t": ("size_t", None),
     "std::ptrdiff_t": ("ptrdiff_t", None),
     "ptrdiff_t": ("ptrdiff_t", None),
-    "std::ostream": ("ostream", "from libcpp.iostream cimport ostream"),
-    "std::istream": ("istream", "from libcpp.iostream cimport istream"),
     "bool": ("bool", "from libcpp cimport bool"),
+    "wchar_t": ("wchar_t", "from libc.stddef cimport wchar_t"),
 }
 
 #: stdint types -> libc.stdint cimport.
@@ -97,7 +103,6 @@ _BUILTINS = {
     "float",
     "double",
     "long double",
-    "wchar_t",
     "short int",
     "long int",
     "long long int",
@@ -174,8 +179,17 @@ class TypeMapper:
 
         name, args = _split_template(base)
 
-        # User substitutions win over the builtin tables.
-        sub = self.substitutions.get(name) or self.substitutions.get(base)
+        # User substitutions win over the builtin tables.  A substitution
+        # keyed by the FULL instantiation spelling ("pcl::PointCloud<pcl::
+        # PointXYZ>") maps the whole thing to one Cython name; a substitution
+        # keyed by the template name alone keeps the translated arguments.
+        if args is not None:
+            sub_full = self.substitutions.get(base)
+            if sub_full is not None:
+                if sub_full.cimport:
+                    self.cimports.add(sub_full.cimport)
+                return sub_full.cython
+        sub = self.substitutions.get(name)
         if sub is not None:
             if sub.cimport:
                 self.cimports.add(sub.cimport)
@@ -206,6 +220,16 @@ class TypeMapper:
 
     def _render_args(self, args: List[str], keep: int) -> str:
         kept = args[:keep] if keep else args
+        for a in kept:
+            # Non-type template arguments (Histogram<32>, Matrix<float,4,1>)
+            # cannot be declared in Cython; fail loudly so the parser can
+            # skip the enclosing declaration with a warning instead of
+            # emitting an uncompilable pxd.
+            if _NONTYPE_ARG_RE.fullmatch(a):
+                raise UnsupportedTypeError(
+                    f"non-type template argument {a!r} not declarable "
+                    "in Cython"
+                )
         rendered = ", ".join(self._translate(a) for a in kept)
         return f"[{rendered}]"
 
@@ -292,6 +316,4 @@ def _split_template(s: str) -> Tuple[str, Optional[List[str]]]:
         current.append(ch)
     if current:
         args.append("".join(current).strip())
-    # Drop non-type template arguments that are plain integer literals; the
-    # caller decides how many args to keep anyway.
     return name, args

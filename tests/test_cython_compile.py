@@ -30,6 +30,9 @@ from point_types cimport PointXYZ, PointXYZRGB
 from point_cloud cimport PointCloud
 from features cimport Widget, Color, Mode, index_t, name_map, split, add
 from rectangle cimport Rectangle
+from edge_cases cimport (
+    CPoint, c_distance, Blob, Holder, Machine, ANON_FIRST, Middle, Second,
+)
 
 
 def use_everything():
@@ -65,7 +68,27 @@ def use_everything():
         assert r.getArea() == 4
     finally:
         del r
-    return int(idx) + <int> c + <int> m
+
+    cdef CPoint cp
+    cp.cx = 1.0
+    cp.cy = 2.0
+    cdef Blob b
+    b.i = 3
+    cdef Holder h
+    h.fast = 1.0
+    h.precise = 2.0
+    h.blob.f = 3.0
+    cdef Machine* mach = new Machine()
+    try:
+        mach.tune(1)
+        mach.tune(1, 2.0)
+    finally:
+        del mach
+    cdef Second s
+    s.payload.b = 2
+    cdef Middle mid = s.payload
+
+    return int(idx) + <int> c + <int> m + <int> ANON_FIRST
 """
 
 
@@ -79,6 +102,8 @@ def _generate_all(outdir):
          "features.hpp", ["demo"], "features.pxd"),
         (os.path.join(HEADERS, "rectangle.hpp"),
          "rectangle.hpp", ["shapes"], "rectangle.pxd"),
+        (os.path.join(HEADERS, "edge_cases.hpp"),
+         "edge_cases.hpp", [], "edge_cases.pxd"),
     ]
     for header, extern_from, namespaces, out_name in jobs:
         result = generate_pxd(

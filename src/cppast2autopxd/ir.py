@@ -94,7 +94,7 @@ class Variable:
 
 @dataclass
 class Class:
-    """A class/struct/class-template definition."""
+    """A class/struct/union/class-template definition."""
 
     name: str
     # Template parameter names, e.g. ["PointT"] for PointCloud<PointT>.
@@ -104,6 +104,8 @@ class Class:
     # True when the record has no methods/ctors/bases/templates and can be
     # declared as a plain ``cdef struct``.
     is_pod_struct: bool = False
+    # True for named unions: rendered as ``cdef union`` (fields only).
+    is_union: bool = False
     typedefs: List[MemberTypedef] = field(default_factory=list)
     enums: List["Enum"] = field(default_factory=list)
     fields: List[Field] = field(default_factory=list)
@@ -136,9 +138,17 @@ class Module:
     warnings: List[str] = field(default_factory=list)
 
     def block_for(self, namespace: str) -> NamespaceBlock:
-        for b in self.blocks:
-            if b.namespace == namespace:
-                return b
+        """Return the trailing block for *namespace*, appending a new one
+        when the namespace changes.
+
+        Only the LAST block is ever reused: merging all same-namespace
+        declarations into one block would reorder interleaved namespaces
+        (``ns X { P } ns Y { Q } ns X { R uses Q }`` would emit R before Q).
+        Cython accepts multiple extern blocks for the same namespace, so one
+        block per contiguous source region preserves declaration order.
+        """
+        if self.blocks and self.blocks[-1].namespace == namespace:
+            return self.blocks[-1]
         b = NamespaceBlock(namespace=namespace)
         self.blocks.append(b)
         return b

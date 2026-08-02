@@ -92,6 +92,10 @@ def _emit_entity(entity, options: EmitOptions) -> List[str]:
 
 
 def _emit_class(cls: ir.Class, options: EmitOptions, indent: int) -> List[str]:
+    # `cdef` only introduces TOP-LEVEL declarations inside the extern block;
+    # nested declarations (indent > 1) must omit it or Cython errors out.
+    top = indent == 1
+    cdef = "cdef " if top else ""
     pad = _INDENT * indent
     body_pad = _INDENT * (indent + 1)
     lines: List[str] = []
@@ -101,23 +105,35 @@ def _emit_class(cls: ir.Class, options: EmitOptions, indent: int) -> List[str]:
         name += "[" + ", ".join(cls.template_params) + "]"
     bases = f"({', '.join(cls.bases)})" if cls.bases else ""
 
-    if cls.is_pod_struct and not cls.bases:
-        lines.append(f"{pad}cdef struct {name}:")
+    if cls.is_union:
+        lines.append(f"{pad}{cdef}union {name}:")
         if not cls.fields:
             lines.append(f"{body_pad}pass")
         for f in cls.fields:
             lines.append(body_pad + _field_decl(f))
         return lines
 
-    lines.append(f"{pad}cdef cppclass {name}{bases}:")
+    if cls.is_pod_struct and not cls.bases:
+        lines.append(f"{pad}{cdef}struct {name}:")
+        if not cls.fields:
+            lines.append(f"{body_pad}pass")
+        for f in cls.fields:
+            lines.append(body_pad + _field_decl(f))
+        return lines
+
+    lines.append(f"{pad}{cdef}cppclass {name}{bases}:")
     body: List[str] = []
 
-    for td in cls.typedefs:
-        body.append(f"{body_pad}ctypedef {td.underlying} {td.name}")
+    # Declare-before-use order: nested types first, then the typedefs that
+    # commonly alias them, then constructors/fields/methods.  (C++ allows
+    # members to reference types declared later in the class; Cython does
+    # not, so kind-ordering is safer than source order.)
     for enum in cls.enums:
         body.extend(_emit_enum(enum, indent + 1))
     for nested in cls.nested_classes:
         body.extend(_emit_class(nested, options, indent + 1))
+    for td in cls.typedefs:
+        body.append(f"{body_pad}ctypedef {td.underlying} {td.name}")
     for ctor in cls.constructors:
         for sig in _signatures("", cls.name, ctor.params, options):
             body.append(body_pad + sig)
@@ -137,10 +153,14 @@ def _emit_class(cls: ir.Class, options: EmitOptions, indent: int) -> List[str]:
 
 
 def _emit_enum(enum: ir.Enum, indent: int) -> List[str]:
+    top = indent == 1
     pad = _INDENT * indent
     body_pad = _INDENT * (indent + 1)
-    kw = "cdef enum class" if enum.is_scoped else "cdef enum"
-    lines = [f"{pad}{kw} {enum.name}:"]
+    kw = "enum class" if enum.is_scoped else "enum"
+    if top:
+        kw = "cdef " + kw
+    name = f" {enum.name}" if enum.name else ""
+    lines = [f"{pad}{kw}{name}:"]
     if not enum.items:
         lines.append(f"{body_pad}pass")
     for item in enum.items:

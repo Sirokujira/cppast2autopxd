@@ -1,10 +1,12 @@
 """TOML batch-generation config.
 
-A single config file drives the whole pxd generation for a project::
+A single config file drives the whole pxd generation for a project.  All
+relative paths resolve against the CONFIG FILE'S OWN DIRECTORY — for a
+config living at ``pxdgen/pcl_headers.toml``::
 
     [generator]
     std = "c++14"
-    include_dirs = ["pxdgen/headers"]
+    include_dirs = ["headers"]              # -> pxdgen/headers
     defines = []
     nogil = true
     except_plus = true
@@ -14,12 +16,10 @@ A single config file drives the whole pxd generation for a project::
     cimport = "from pcl.eigen cimport Vector4f"
 
     [[headers]]
-    path = "pxdgen/headers/pcl/point_types.h"
+    path = "headers/pcl/point_types.h"      # -> pxdgen/headers/pcl/...
     extern_from = "pcl/point_types.h"
-    output = "src/pcl/pxd/point_types.pxd"
+    output = "../src/pcl/pxd/point_types.pxd"   # -> src/pcl/pxd/...
     namespaces = ["pcl"]
-
-Paths are resolved relative to the config file's directory.
 """
 
 from __future__ import annotations

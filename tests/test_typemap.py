@@ -111,3 +111,43 @@ def test_bool_maps_to_libcpp_bool():
     m = make_mapper()
     assert m.cython_type("bool") == "bool"
     assert "from libcpp cimport bool" in m.cimports
+
+
+def test_ostream_rejected_not_silently_broken():
+    m = make_mapper()
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("std::ostream &")
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("std::istream &")
+
+
+def test_wchar_t_maps_to_libc_stddef():
+    m = make_mapper()
+    assert m.cython_type("wchar_t") == "wchar_t"
+    assert "from libc.stddef cimport wchar_t" in m.cimports
+
+
+def test_nontype_template_args_rejected():
+    m = make_mapper()
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("pcl::Histogram<32>")
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("Matrix<float, 4, 1>")
+
+
+def test_substitution_full_instantiation_replaces_whole_type():
+    m = make_mapper(
+        substitutions={
+            "pcl::PointCloud<pcl::PointXYZ>": Substitution(
+                cython="PointCloudXYZ",
+                cimport="from pcl.cloud cimport PointCloudXYZ",
+            )
+        }
+    )
+    assert m.cython_type("pcl::PointCloud<pcl::PointXYZ>") == "PointCloudXYZ"
+    assert "from pcl.cloud cimport PointCloudXYZ" in m.cimports
+    # template-name-keyed substitution still keeps translated args
+    m2 = make_mapper(
+        substitutions={"Eigen::Map": Substitution(cython="Map")}
+    )
+    assert m2.cython_type("Eigen::Map<pcl::PointXYZ>") == "Map[PointXYZ]"

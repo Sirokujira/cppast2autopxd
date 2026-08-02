@@ -19,7 +19,9 @@ smart pointers and STL containers.
 - `cdef extern from "header" namespace "ns" nogil:` blocks per namespace
 - Classes / structs → `cdef cppclass` (plain data structs → `cdef struct`)
 - Class templates → `cdef cppclass Name[T]`, member typedefs (`Ptr` aliases)
-- Enums (plain and `enum class`), typedefs, `using` aliases, free functions
+- Enums (plain, `enum class`, and anonymous), typedefs, `using` aliases,
+  free functions, named unions, `extern "C"` blocks, nested classes/enums/
+  unions inside classes
 - `std::` type mapping with automatic cimports (`vector`, `map`, `string`,
   `shared_ptr`, `pair`, stdint types, ...); default template arguments such as
   allocators are dropped to match Cython's `libcpp` declarations
@@ -59,10 +61,13 @@ Batch mode from a TOML config:
 cppast2autopxd --config pxdgen/pcl_headers.toml
 ```
 
+All relative paths in the config resolve against the **config file's own
+directory** (here: `pxdgen/`):
+
 ```toml
 [generator]
 std = "c++14"
-include_dirs = ["pxdgen/headers"]
+include_dirs = ["headers"]            # -> pxdgen/headers
 nogil = true
 except_plus = true
 
@@ -71,9 +76,9 @@ cython = "Vector4f"
 cimport = "from pcl.eigen cimport Vector4f"
 
 [[headers]]
-path = "pxdgen/headers/pcl/point_types.h"
+path = "headers/pcl/point_types.h"    # -> pxdgen/headers/pcl/point_types.h
 extern_from = "pcl/point_types.h"     # path written into `cdef extern from`
-output = "src/pcl/pxd/point_types.pxd"
+output = "../src/pcl/pxd/point_types.pxd"   # -> src/pcl/pxd/ from repo root
 namespaces = ["pcl"]
 ```
 
