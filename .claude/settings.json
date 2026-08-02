@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -m cython:*)",
+      "Bash(cython:*)",
+      "Bash(cppast2autopxd:*)",
+      "Bash(python -m cppast2autopxd:*)",
+      "Bash(pip install -e:*)",
+      "Bash(clang -print-resource-dir)"
+    ]
+  }
+}

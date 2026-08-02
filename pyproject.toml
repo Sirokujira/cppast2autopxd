@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cppast2autopxd"
+version = "0.1.0"
+description = "Generate Cython .pxd declarations from C++ headers (libclang-based, cppast-inspired)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Tooru Oonuma", email = "t753github@gmail.com" }]
+keywords = ["cython", "pxd", "libclang", "cppast", "binding-generator", "pcl"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "libclang>=14",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "Cython>=3.0"]
+
+[project.scripts]
+cppast2autopxd = "cppast2autopxd.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sirokujira/cppast2autopxd"
+Issues = "https://github.com/sirokujira/cppast2autopxd/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
