@@ -40,6 +40,10 @@ cppast2autopxd tests/headers/rectangle.hpp --namespace shapes  # smoke test
    for PCL point types.
 5. `std::vector`'s allocator argument (and other default template args) must
    be dropped to match Cython's `libcpp` declarations.
+6. Methods returning a NON-CONST reference (`T&`) never get `except +`:
+   the try/catch wrapper stores the result in a by-value temporary, so
+   `&cloud[i]` would point at a copy and writes would be silently lost
+   (proven against real PCL; see `emitter._returns_mutable_reference`).
 
 ## Editing rules
 

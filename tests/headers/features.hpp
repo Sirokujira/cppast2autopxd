@@ -35,6 +35,7 @@ public:
     int id() const;
     void rename(const std::string& name);
     std::string name() const;
+    const std::string& title() const;
     static Widget make(int id = 0);
     double& operator[](std::size_t idx);
     bool operator==(const Widget& other) const;

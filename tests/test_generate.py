@@ -54,7 +54,11 @@ def test_point_cloud_template():
     assert "ctypedef shared_ptr[PointCloud[PointT]] Ptr" in text
     assert "vector[PointT] points" in text
     assert "size_t size() except +" in text
-    assert "PointT& operator[](size_t n) except +" in text
+    # mutable-reference returns must NOT carry `except +` (Cython would
+    # store the result in a by-value temp and writes through it get lost)
+    assert "PointT& operator[](size_t n)\n" in text
+    assert "PointT& at(size_t n)\n" in text
+    assert "PointT& front()\n" in text
     assert "PointCloud(unsigned int width_, unsigned int height_) except +" in text
     assert "from libcpp.memory cimport shared_ptr" in text
     assert "from libcpp.vector cimport vector" in text
@@ -84,7 +88,9 @@ def test_features_full_matrix():
     # default arguments expand into overloads (no `=*` for extern functions)
     assert "Widget make() except +" in text
     assert "Widget make(int id) except +" in text
-    assert "double& operator[](size_t idx) except +" in text
+    # mutable-ref return: no except+; const-ref return: keeps except+
+    assert "double& operator[](size_t idx)\n" in text
+    assert "const string& title() except +" in text
     assert "bool operator==(const Widget& other) except +" in text
     # private members skipped
     assert "secret_" not in text

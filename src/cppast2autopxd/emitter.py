@@ -200,8 +200,25 @@ def _one_signature(
     # Cython's grammar rejects `const` combined with `except +` (in either
     # order), so exception propagation wins; the const qualifier is only
     # emitted when except+ is disabled.
-    if options.except_plus:
+    if options.except_plus and not _returns_mutable_reference(return_type):
         sig += " except +"
     elif is_const:
         sig += " const"
     return sig
+
+
+def _returns_mutable_reference(return_type: str) -> bool:
+    """True for non-const lvalue-reference returns (``T&``).
+
+    Such accessors (operator[], front, back, at, ...) must NOT carry
+    ``except +``: Cython's try/catch wrapping stores the call result in a
+    BY-VALUE temporary, so ``&cloud[i]`` would silently point at a copy and
+    writes through it would be lost.  This matches Cython's own libcpp
+    declarations (``T& operator[](size_type)`` has no ``except +``).  The
+    trade-off: a C++ exception thrown by such a method terminates instead of
+    propagating - bounds-check in the wrapper layer.
+    """
+    return (
+        return_type.endswith("&")
+        and not return_type.startswith("const ")
+    )

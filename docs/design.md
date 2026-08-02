@@ -40,6 +40,7 @@ headers and are the single largest maintenance cost of a Cython wrapper.
 | anonymous union/struct fields | flattened into the parent class |
 | default arguments | overload expansion (`f()`, `f(int)`) — `=*` is only valid for template parameter defaults |
 | `const` method + `except +` | `except +` wins; Cython's grammar rejects the combination |
+| method returning `T&` (non-const) | no `except +` — Cython's try/catch wrapping stores the result in a by-value temp, so writes through `&obj[i]` would be silently lost (matches libcpp's `T& operator[](size_type)`) |
 | `std::vector<T, Alloc>` | `vector[T]` (allocator dropped, matches libcpp) |
 | `boost::shared_ptr` / `pcl::shared_ptr` | `shared_ptr` from `libcpp.memory` |
 | scoped enum | `cdef enum class` |

@@ -28,6 +28,8 @@ public:
     void resize(std::size_t count);
     void push_back(const PointT& pt);
     PointT& at(std::size_t n);
+    PointT& front();
+    PointT& back();
     PointT& operator[](std::size_t n);
     bool isOrganized() const;
 };
