@@ -71,19 +71,16 @@ _STD_SIMPLE: Dict[str, Tuple[str, Optional[str]]] = {
     "wchar_t": ("wchar_t", "from libc.stddef cimport wchar_t"),
 }
 
-#: stdint types -> libc.stdint cimport.
-_STDINT = {
-    "int8_t",
-    "int16_t",
-    "int32_t",
-    "int64_t",
-    "uint8_t",
-    "uint16_t",
-    "uint32_t",
-    "uint64_t",
-    "intptr_t",
-    "uintptr_t",
-}
+#: stdint types -> libc.stdint cimport (all families libc/stdint.pxd covers).
+_STDINT = (
+    {f"int{w}_t" for w in (8, 16, 32, 64)}
+    | {f"uint{w}_t" for w in (8, 16, 32, 64)}
+    | {f"int_least{w}_t" for w in (8, 16, 32, 64)}
+    | {f"uint_least{w}_t" for w in (8, 16, 32, 64)}
+    | {f"int_fast{w}_t" for w in (8, 16, 32, 64)}
+    | {f"uint_fast{w}_t" for w in (8, 16, 32, 64)}
+    | {"intptr_t", "uintptr_t", "intmax_t", "uintmax_t"}
+)
 
 #: Builtin C types passed through untouched (possibly multi-word).
 _BUILTINS = {

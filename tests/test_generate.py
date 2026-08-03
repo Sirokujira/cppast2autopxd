@@ -160,6 +160,35 @@ def test_edge_cases():
     assert text.index("cdef struct Middle:") < text.index("Middle payload")
 
 
+def test_template_edge_cases():
+    result = generate_pxd(
+        os.path.join(HEADERS, "templates.hpp"),
+        extern_from="templates.hpp",
+        namespaces=["tpl"],
+    )
+    text = result.text
+
+    # defaulted template type parameter carries =* so Box[T] use sites work
+    assert "cdef cppclass Box[T, Alloc=*]:" in text
+    # exactly one Box declaration: specializations are skipped, not emitted
+    assert text.count("cppclass Box") == 1
+    assert any("explicit specialization" in w for w in result.warnings)
+    assert any("partial specialization" in w for w in result.warnings)
+    # static data member warn-skipped, never emitted as a field
+    assert "int instances" not in text
+    assert any("static data member" in w for w in result.warnings)
+
+
+def test_stdint_families():
+    from cppast2autopxd.typemap import TypeMapper
+
+    m = TypeMapper()
+    assert m.cython_type("std::intmax_t") == "intmax_t"
+    assert m.cython_type("int_least8_t") == "int_least8_t"
+    assert m.cython_type("uint_fast32_t") == "uint_fast32_t"
+    assert "from libc.stdint cimport intmax_t" in m.cimports
+
+
 def test_typemap_regressions_in_generation():
     """ostream methods are skipped with a warning, not emitted broken."""
     import textwrap

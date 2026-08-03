@@ -33,6 +33,7 @@ from rectangle cimport Rectangle
 from edge_cases cimport (
     CPoint, c_distance, Blob, Holder, Machine, ANON_FIRST, Middle, Second,
 )
+from templates cimport Box, MyAlloc
 
 
 def use_everything():
@@ -88,6 +89,15 @@ def use_everything():
     s.payload.b = 2
     cdef Middle mid = s.payload
 
+    # defaulted template parameter: usable with one arg AND with two
+    cdef Box[double]* box1 = new Box[double]()
+    try:
+        box1.put(1.5)
+    finally:
+        del box1
+    cdef Box[double, MyAlloc[double]]* box2 = new Box[double, MyAlloc[double]]()
+    del box2
+
     return int(idx) + <int> c + <int> m + <int> ANON_FIRST
 """
 
@@ -104,6 +114,8 @@ def _generate_all(outdir):
          "rectangle.hpp", ["shapes"], "rectangle.pxd"),
         (os.path.join(HEADERS, "edge_cases.hpp"),
          "edge_cases.hpp", [], "edge_cases.pxd"),
+        (os.path.join(HEADERS, "templates.hpp"),
+         "templates.hpp", ["tpl"], "templates.pxd"),
     ]
     for header, extern_from, namespaces, out_name in jobs:
         result = generate_pxd(

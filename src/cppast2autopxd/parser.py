@@ -195,7 +195,24 @@ class _Lowering:
         try:
             if kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
                 if cursor.is_definition() and self._name_selected(cursor.spelling):
+                    # Explicit full specializations reuse the primary
+                    # template's name; emitting them would declare a
+                    # duplicate plain class.
+                    n_targs = getattr(
+                        cursor, "get_num_template_arguments", lambda: -1
+                    )()
+                    if n_targs >= 0:
+                        raise _SkipEntity(
+                            f"explicit specialization "
+                            f"{cursor.displayname!r} (Cython declares only "
+                            "the primary template)"
+                        )
                     self._add(namespace, self._lower_class(cursor, template=False))
+            elif kind == CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION:
+                raise _SkipEntity(
+                    f"partial specialization {cursor.displayname!r} "
+                    "(Cython declares only the primary template)"
+                )
             elif kind == CursorKind.UNION_DECL:
                 if (
                     cursor.is_definition()
@@ -268,7 +285,13 @@ class _Lowering:
         for child in cursor.get_children():
             kind = child.kind
             if kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
-                cls.template_params.append(child.spelling)
+                # A defaulted template parameter must carry `=*` (the one
+                # legitimate use of that marker) or use sites passing fewer
+                # arguments fail to compile.
+                param = child.spelling
+                if any(tok.spelling == "=" for tok in child.get_tokens()):
+                    param += "=*"
+                cls.template_params.append(param)
                 continue
             if kind in (
                 CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
@@ -328,6 +351,12 @@ class _Lowering:
                         cls.nested_classes.append(
                             self._lower_class(child, template=False)
                         )
+                elif kind == CursorKind.VAR_DECL:
+                    raise _SkipEntity(
+                        f"static data member {child.spelling!r} (declare it "
+                        "in a separate extern block with its qualified name "
+                        "if needed)"
+                    )
                 # DESTRUCTOR / access specifiers / static asserts: ignore.
             except (UnsupportedTypeError, _SkipEntity) as err:
                 reason = getattr(err, "reason", None) or str(err)
