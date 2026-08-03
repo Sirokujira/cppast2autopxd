@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import List, Optional
 
 from . import __version__
@@ -31,6 +32,9 @@ def generate_pxd(
 ) -> "GenerationResult":
     """Generate pxd text for one header. Returns text plus warnings."""
     mapper = TypeMapper(substitutions=dict(substitutions or {}))
+    # Names brought in by user-supplied cimport lines are declarable.
+    for line in extra_cimports or []:
+        mapper.known_names.update(_imported_names(line))
     options = ParseOptions(
         include_dirs=list(include_dirs or []),
         defines=list(defines or []),
@@ -65,6 +69,31 @@ class GenerationResult:
     def __init__(self, text: str, warnings: List[str]):
         self.text = text
         self.warnings = warnings
+
+
+def _imported_names(cimport_line: str) -> List[str]:
+    """Extract the names a cimport line brings into scope."""
+    names: List[str] = []
+    m = re.match(r"\s*from\s+\S+\s+cimport\s+(.+)", cimport_line)
+    if m:
+        for part in m.group(1).split(","):
+            part = part.strip()
+            if " as " in part:
+                part = part.split(" as ")[-1].strip()
+            if part and part != "*":
+                names.append(part)
+        return names
+    m = re.match(r"\s*cimport\s+(.+)", cimport_line)
+    if m:
+        for part in m.group(1).split(","):
+            part = part.strip()
+            if " as " in part:
+                part = part.split(" as ")[-1].strip()
+            else:
+                part = part.split(".")[0]
+            if part:
+                names.append(part)
+    return names
 
 
 def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:

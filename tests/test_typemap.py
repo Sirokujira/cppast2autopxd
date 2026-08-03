@@ -10,6 +10,9 @@ from cppast2autopxd.typemap import (
 def make_mapper(**kwargs):
     m = TypeMapper(**kwargs)
     m.local_namespaces.add("pcl")
+    # Names the hypothetical pxd declares (the parser shares its declared
+    # set with the mapper; unit tests seed it directly).
+    m.known_names.update({"PointXYZ", "PointCloud"})
     return m
 
 
@@ -133,6 +136,45 @@ def test_nontype_template_args_rejected():
         m.cython_type("pcl::Histogram<32>")
     with pytest.raises(UnsupportedTypeError):
         m.cython_type("Matrix<float, 4, 1>")
+
+
+def test_undeclared_bare_name_rejected():
+    m = make_mapper()
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("MysteryType")
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("__m128")
+
+
+def test_scope_names_resolve():
+    m = make_mapper()
+    m.push_scope({"PointT"})
+    assert m.cython_type("PointT&") == "PointT&"
+    m.pop_scope()
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("PointT&")
+
+
+def test_nested_class_qualified_name_dotted():
+    m = make_mapper()
+    m.known_names.add("Machine")
+    assert m.cython_type("Machine::Mode") == "Machine.Mode"
+    assert m.cython_type("pcl::PointCloud::Ptr") == "PointCloud.Ptr"
+
+
+def test_unqualified_shared_ptr_alias_resolves():
+    """pcl::shared_ptr spelled bare inside namespace pcl still maps."""
+    m = make_mapper()
+    assert m.cython_type("shared_ptr<PointXYZ>") == "shared_ptr[PointXYZ]"
+    assert "from libcpp.memory cimport shared_ptr" in m.cimports
+
+
+def test_enum_constant_template_arg_rejected():
+    """Non-literal non-type template args (enum constants) must not slip
+    through as bogus type arguments."""
+    m = make_mapper()
+    with pytest.raises(UnsupportedTypeError):
+        m.cython_type("PointCloud<LIMIT>")
 
 
 def test_substitution_full_instantiation_replaces_whole_type():

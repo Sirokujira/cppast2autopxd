@@ -213,6 +213,7 @@ def _one_signature(
         part = p.type
         if p.name:
             part += f" {p.name}"
+        part += "".join(f"[{d}]" for d in p.array_dims)
         rendered.append(part)
     sig = f"{name}({', '.join(rendered)})"
     if return_type:

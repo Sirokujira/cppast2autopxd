@@ -20,6 +20,9 @@ class Param:
     type: str
     name: str = ""
     has_default: bool = False
+    # Multi-dimensional array parameters keep their dims verbatim
+    # (``float m[4][4]``); "" renders an incomplete first dim (``m[][4]``).
+    array_dims: List[str] = field(default_factory=list)
 
 
 @dataclass

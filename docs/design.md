@@ -56,12 +56,34 @@ inside pip builds and CI. The IR boundary is designed so a
 can be added later without touching typemap/emitter — that is the "cppast2"
 in the name.
 
+## Name resolution discipline
+
+A bare identifier in a type position is only emitted when the pxd actually
+declares it (parser and mapper share a `known_names` set, plus per-class
+scopes for template parameters/member typedefs) or a cimport/substitution
+provides it. When the sugared spelling references something from an included
+header, the canonical spelling is tried (`uindex_t` -> `unsigned int`,
+`pcl::Indices` -> `vector[int]`); if that also fails the enclosing
+declaration is skipped WITH a warning. Nested-type references render with
+Cython's dotted syntax (`Machine::Mode` -> `Machine.Mode`). Forward-declared
+classes that are never defined in the file are emitted as opaque
+`cdef cppclass Name: pass` so pointer uses stay valid.
+
+Headers are parsed through a synthetic wrapper TU (`#include "<header>"`),
+so `#pragma once`/include guards behave exactly as in a real compilation —
+required for headers that are re-included by their own `impl/*.hpp`
+(pcl/point_types.h does this).
+
 ## Known limitations
 
 - Non-type template parameters → class skipped (Cython cannot declare them)
+- Variadic templates (parameter packs) → skipped
 - Alias templates (`template<class T> using X = ...`) → skipped
-- Function templates → skipped
-- Conversion operators (except none) → skipped
+- Function templates and member function templates → skipped
+- Conversion operators → skipped
+- Static data members → skipped (declare in a separate extern block)
+- Explicit/partial template specializations → skipped (primary template
+  only)
 - Qualified names from unwrapped namespaces (e.g. `Eigen::Vector4f`) require
   an explicit `[typemap.substitutions]` entry; the failure is loud, not
   silent

@@ -44,6 +44,16 @@ cppast2autopxd tests/headers/rectangle.hpp --namespace shapes  # smoke test
    the try/catch wrapper stores the result in a by-value temporary, so
    `&cloud[i]` would point at a copy and writes would be silently lost
    (proven against real PCL; see `emitter._returns_mutable_reference`).
+7. Headers are parsed through a synthetic wrapper TU (`#include "..."`),
+   never as the main file — otherwise `#pragma once` is inert and headers
+   re-included by their own `impl/*.hpp` explode (real pcl/point_types.h).
+8. Bare type names must resolve against `TypeMapper.known_names`/scopes —
+   NEVER pass unknown identifiers through "on faith"; that emits pxd text
+   Cython rejects. The parser retries with the canonical spelling
+   (`uindex_t` -> `unsigned int`, `Indices` -> `vector[int]`) before
+   warn-skipping the declaration (see `parser._Lowering._type`).
+9. `tests/test_real_pcl.py` runs against /usr/include/pcl-* when present —
+   real PCL message headers MUST keep generating cython-valid pxd.
 
 ## Editing rules
 

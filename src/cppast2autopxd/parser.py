@@ -5,14 +5,23 @@ into the backend-agnostic IR (:mod:`cppast2autopxd.ir`).
 
 Design notes
 ------------
-* Only cursors located in the parsed file itself are exported; includes are
-  parsed (so types resolve) but not re-declared.
+* The target header is parsed through a synthetic wrapper TU
+  (``#include "<header>"``) so ``#pragma once`` and include guards behave
+  exactly as in a normal compilation — headers that are transitively
+  re-included by their own ``impl/*.hpp`` files parse fine.
+* Only cursors located in the target header itself are exported; includes
+  are parsed (so types resolve) but not re-declared.
 * Private/protected members, deleted/move members, rvalue-reference and
-  function-pointer signatures are skipped, each with a recorded warning, so a
+  function-pointer signatures, specializations, member templates and other
+  non-declarable constructs are skipped, each with a recorded warning, so a
   generation run is reproducible and auditable.
 * Anonymous unions/structs (ubiquitous in PCL point types) are flattened into
   their enclosing class: for declaration purposes Cython only needs member
   names and types, the real memory layout always comes from the C++ header.
+* Type names must resolve against what the pxd actually declares (or maps):
+  when a sugared spelling references something from an included header, the
+  canonical spelling is tried before giving up, so ``uindex_t`` resolves to
+  ``unsigned int`` and ``Indices`` to ``vector[int]``.
 """
 
 from __future__ import annotations
@@ -39,6 +48,8 @@ _SUPPORTED_OPERATORS = {
     "operator>=", "operator++", "operator--", "operator()", "operator[]",
     "operator=",
 }
+
+_WRAPPER_NAME = "__cppast2autopxd_wrapper.cpp"
 
 
 @dataclass
@@ -107,14 +118,10 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
     """Parse *path* and lower it into an :class:`ir.Module`."""
     if not os.path.isfile(path):
         raise ParseError(f"header not found: {path}")
+    main_abs = os.path.realpath(path)
 
     index = cindex.Index.create()
-    # -Wno-pragma-once-outside-header: headers are parsed as main files, so
-    # clang would otherwise warn about every `#pragma once`.
-    args = [
-        "-x", "c++", f"-std={options.std}",
-        "-Wno-pragma-once-outside-header",
-    ]
+    args = ["-x", "c++", f"-std={options.std}"]
     args += list(_builtin_include_args())
     args += [f"-I{d}" for d in options.include_dirs]
     args += [f"-D{d}" for d in options.defines]
@@ -122,8 +129,9 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
 
     try:
         tu = index.parse(
-            path,
+            _WRAPPER_NAME,
             args=args,
+            unsaved_files=[(_WRAPPER_NAME, f'#include "{main_abs}"\n')],
             options=cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES,
         )
     except cindex.TranslationUnitLoadError as err:
@@ -145,7 +153,7 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
             f"{path}:\n  " + "\n  ".join(fatal)
         )
 
-    lowering = _Lowering(module, options, mapper, os.path.realpath(path))
+    lowering = _Lowering(module, options, mapper, main_abs)
     lowering.visit_children(tu.cursor, namespace="")
     return module
 
@@ -168,9 +176,10 @@ class _Lowering:
         self.options = options
         self.mapper = mapper
         self.main_file = main_file
-        # Names of records/enums declared so far, used to resolve bare
-        # references and to auto-register local namespaces.
-        self.declared: Set[str] = set()
+        # Names of records/enums/typedefs declared so far.  Shared with the
+        # type mapper so bare identifiers only resolve against what this pxd
+        # really declares (plus cimports/substitutions).
+        self.declared: Set[str] = mapper.known_names
 
     # ------------------------------------------------------------ traversal
     def visit_children(self, cursor, namespace: str) -> None:
@@ -185,6 +194,9 @@ class _Lowering:
             inner = (
                 f"{namespace}::{cursor.spelling}" if namespace else cursor.spelling
             )
+            # Register both the full namespace path and its top component so
+            # qualified spellings strip correctly at any nesting depth.
+            self.mapper.local_namespaces.add(inner)
             self.mapper.local_namespaces.add(inner.split("::")[0])
             self.visit_children(cursor, inner)
             return
@@ -194,20 +206,7 @@ class _Lowering:
 
         try:
             if kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
-                if cursor.is_definition() and self._name_selected(cursor.spelling):
-                    # Explicit full specializations reuse the primary
-                    # template's name; emitting them would declare a
-                    # duplicate plain class.
-                    n_targs = getattr(
-                        cursor, "get_num_template_arguments", lambda: -1
-                    )()
-                    if n_targs >= 0:
-                        raise _SkipEntity(
-                            f"explicit specialization "
-                            f"{cursor.displayname!r} (Cython declares only "
-                            "the primary template)"
-                        )
-                    self._add(namespace, self._lower_class(cursor, template=False))
+                self._visit_record(cursor, namespace)
             elif kind == CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION:
                 raise _SkipEntity(
                     f"partial specialization {cursor.displayname!r} "
@@ -224,8 +223,10 @@ class _Lowering:
                 if cursor.is_definition() and self._name_selected(cursor.spelling):
                     self._add(namespace, self._lower_class(cursor, template=True))
             elif kind == CursorKind.ENUM_DECL:
-                if cursor.is_definition() and self._name_selected(cursor.spelling):
-                    self._add(namespace, self._lower_enum(cursor))
+                if cursor.is_definition():
+                    enum = self._lower_enum(cursor)
+                    if self._name_selected(enum.name) or not enum.name:
+                        self._add(namespace, enum)
             elif kind in (CursorKind.TYPEDEF_DECL, CursorKind.TYPE_ALIAS_DECL):
                 if self._name_selected(cursor.spelling):
                     self._add(namespace, self._lower_typedef(cursor))
@@ -252,8 +253,6 @@ class _Lowering:
                     "(not declarable in Cython pxd)"
                 )
             # extern "C" / extern "C++" blocks -> recurse transparently.
-            # Modern libclang reports them as LINKAGE_SPEC; UNEXPOSED_DECL is
-            # kept for older bindings.
             elif kind in (
                 CursorKind.UNEXPOSED_DECL,
                 getattr(CursorKind, "LINKAGE_SPEC", CursorKind.UNEXPOSED_DECL),
@@ -266,11 +265,37 @@ class _Lowering:
                 f"skipped {cursor.spelling!r}: {err}"
             )
 
+    def _visit_record(self, cursor, namespace: str) -> None:
+        name = cursor.spelling
+        if not cursor.is_definition():
+            # Forward declaration.  When the definition follows in this same
+            # file it will be lowered there; otherwise declare the name as
+            # an opaque type so pointer/reference uses stay valid.
+            definition = cursor.get_definition()
+            if definition is not None and self._in_main_file(definition):
+                return
+            if name and self._name_selected(name) and name not in self.declared:
+                self.declared.add(name)
+                self._add(namespace, ir.Class(name=name))
+            return
+        if not self._name_selected(name):
+            return
+        # Explicit full specializations reuse the primary template's name;
+        # emitting them would declare a duplicate plain class.
+        n_targs = getattr(cursor, "get_num_template_arguments", lambda: -1)()
+        if n_targs >= 0:
+            raise _SkipEntity(
+                f"explicit specialization {cursor.displayname!r} "
+                "(Cython declares only the primary template)"
+            )
+        self._add(namespace, self._lower_class(cursor, template=False))
+
     # ------------------------------------------------------------- lowering
     def _lower_class(self, cursor, template: bool) -> ir.Class:
         cls = ir.Class(name=cursor.spelling)
         self.declared.add(cursor.spelling)
-        has_members = False
+
+        children = list(cursor.get_children())
 
         # Records that are the *type of a named field* (``union {...} u;``)
         # must not be flattened into the parent — their members live behind
@@ -278,93 +303,147 @@ class _Lowering:
         # sibling FIELD_DECL.
         field_type_hashes = {
             ch.type.get_declaration().hash
-            for ch in cursor.get_children()
+            for ch in children
             if ch.kind == CursorKind.FIELD_DECL
         }
 
-        for child in cursor.get_children():
-            kind = child.kind
-            if kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
-                # A defaulted template parameter must carry `=*` (the one
-                # legitimate use of that marker) or use sites passing fewer
-                # arguments fail to compile.
-                param = child.spelling
-                if any(tok.spelling == "=" for tok in child.get_tokens()):
-                    param += "=*"
-                cls.template_params.append(param)
-                continue
-            if kind in (
-                CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
-                CursorKind.TEMPLATE_TEMPLATE_PARAMETER,
-            ):
-                raise _SkipEntity(
-                    f"class template {cursor.spelling!r} uses a non-type "
-                    "template parameter (not declarable in Cython)"
-                )
-            if kind == CursorKind.CXX_BASE_SPECIFIER:
-                if child.access_specifier == AccessSpecifier.PUBLIC:
+        # Class-local scope: template parameters now, nested type names and
+        # member typedef names as they are lowered (pass order matches the
+        # emitter's declare-before-use emission order).
+        scope: Set[str] = set()
+        self.mapper.push_scope(scope)
+        try:
+            # ---- template parameters and bases
+            for child in children:
+                kind = child.kind
+                if kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
+                    if any(t.spelling == "..." for t in child.get_tokens()):
+                        raise _SkipEntity(
+                            f"variadic class template {cursor.spelling!r} "
+                            "(parameter packs not declarable in Cython)"
+                        )
+                    # A defaulted template parameter must carry `=*` (the
+                    # one legitimate use of that marker) or use sites
+                    # passing fewer arguments fail to compile.
+                    param = child.spelling
+                    scope.add(param)
+                    if any(t.spelling == "=" for t in child.get_tokens()):
+                        param += "=*"
+                    cls.template_params.append(param)
+                elif kind in (
+                    CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
+                    CursorKind.TEMPLATE_TEMPLATE_PARAMETER,
+                ):
+                    raise _SkipEntity(
+                        f"class template {cursor.spelling!r} uses a "
+                        "non-type/template template parameter "
+                        "(not declarable in Cython)"
+                    )
+                elif kind == CursorKind.CXX_BASE_SPECIFIER:
+                    if child.access_specifier == AccessSpecifier.PUBLIC:
+                        try:
+                            cls.bases.append(self._type(child.type))
+                        except UnsupportedTypeError as err:
+                            self.module.warnings.append(
+                                f"{cursor.spelling}: dropped base class: {err}"
+                            )
+
+            # ---- pass 1: nested types (enums, classes, unions)
+            for child in children:
+                if not self._is_public(child):
+                    continue
+                kind = child.kind
+                try:
+                    if kind == CursorKind.ENUM_DECL and child.is_definition():
+                        enum = self._lower_enum(child, register=False)
+                        cls.enums.append(enum)
+                        if enum.name:
+                            scope.add(enum.name)
+                    elif kind == CursorKind.UNION_DECL and child.is_definition():
+                        if child.is_anonymous():
+                            continue  # handled with fields (flattening)
+                        nested = self._lower_union(child, register=False)
+                        cls.nested_classes.append(nested)
+                        scope.add(nested.name)
+                    elif kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
+                        if child.is_definition() and not child.is_anonymous():
+                            nested = self._lower_class(child, template=False)
+                            cls.nested_classes.append(nested)
+                            scope.add(nested.name)
+                except (UnsupportedTypeError, _SkipEntity) as err:
+                    reason = getattr(err, "reason", None) or str(err)
+                    self.module.warnings.append(
+                        f"{cursor.spelling}.{child.spelling}: skipped ({reason})"
+                    )
+
+            # ---- pass 2: member typedefs
+            for child in children:
+                if not self._is_public(child):
+                    continue
+                if child.kind in (CursorKind.TYPEDEF_DECL, CursorKind.TYPE_ALIAS_DECL):
                     try:
-                        cls.bases.append(self._type(child.type))
+                        cls.typedefs.append(
+                            ir.MemberTypedef(
+                                name=child.spelling,
+                                underlying=self._type(
+                                    child.underlying_typedef_type
+                                ),
+                            )
+                        )
+                        scope.add(child.spelling)
                     except UnsupportedTypeError as err:
                         self.module.warnings.append(
-                            f"{cursor.spelling}: dropped base class: {err}"
+                            f"{cursor.spelling}.{child.spelling}: "
+                            f"skipped ({err})"
                         )
-                continue
-            if not self._is_public(child, cursor):
-                continue
 
-            try:
-                if kind == CursorKind.FIELD_DECL:
-                    self._lower_field(child, cls)
-                elif kind in (CursorKind.UNION_DECL, CursorKind.STRUCT_DECL) and (
-                    child.is_anonymous()
-                ):
-                    if child.hash in field_type_hashes:
+            # ---- pass 3: constructors, fields, methods
+            for child in children:
+                if not self._is_public(child):
+                    continue
+                kind = child.kind
+                try:
+                    if kind == CursorKind.FIELD_DECL:
+                        self._lower_field(child, cls)
+                    elif kind in (
+                        CursorKind.UNION_DECL,
+                        CursorKind.STRUCT_DECL,
+                    ) and child.is_anonymous() and child.is_definition():
+                        if child.hash in field_type_hashes:
+                            raise _SkipEntity(
+                                "unnamed record typing a named field "
+                                "(not declarable in Cython)"
+                            )
+                        self._flatten_anonymous(child, cls)
+                    elif kind == CursorKind.CXX_METHOD:
+                        method = self._lower_method(child)
+                        if method is not None:
+                            cls.methods.append(method)
+                    elif kind == CursorKind.CONSTRUCTOR:
+                        ctor = self._lower_constructor(child)
+                        if ctor is not None:
+                            cls.constructors.append(ctor)
+                    elif kind == CursorKind.FUNCTION_TEMPLATE:
                         raise _SkipEntity(
-                            "unnamed record typing a named field "
-                            "(not declarable in Cython)"
+                            f"member function template {child.spelling!r} "
+                            "(not declarable in Cython pxd)"
                         )
-                    self._flatten_anonymous(child, cls, field_type_hashes)
-                elif kind == CursorKind.UNION_DECL and child.is_definition():
-                    cls.nested_classes.append(self._lower_union(child))
-                elif kind == CursorKind.CXX_METHOD:
-                    method = self._lower_method(child)
-                    if method is not None:
-                        cls.methods.append(method)
-                        has_members = True
-                elif kind == CursorKind.CONSTRUCTOR:
-                    ctor = self._lower_constructor(child)
-                    if ctor is not None:
-                        cls.constructors.append(ctor)
-                        has_members = True
-                elif kind in (CursorKind.TYPEDEF_DECL, CursorKind.TYPE_ALIAS_DECL):
-                    cls.typedefs.append(
-                        ir.MemberTypedef(
-                            name=child.spelling,
-                            underlying=self._type(child.underlying_typedef_type),
+                    elif kind == CursorKind.VAR_DECL:
+                        raise _SkipEntity(
+                            f"static data member {child.spelling!r} (declare "
+                            "it in a separate extern block with its "
+                            "qualified name if needed)"
                         )
+                    # DESTRUCTOR / access specifiers / static asserts: ignore.
+                except (UnsupportedTypeError, _SkipEntity) as err:
+                    reason = getattr(err, "reason", None) or str(err)
+                    self.module.warnings.append(
+                        f"{cursor.spelling}.{child.spelling}: skipped ({reason})"
                     )
-                elif kind == CursorKind.ENUM_DECL and child.is_definition():
-                    cls.enums.append(self._lower_enum(child))
-                elif kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
-                    if child.is_definition() and not child.is_anonymous():
-                        cls.nested_classes.append(
-                            self._lower_class(child, template=False)
-                        )
-                elif kind == CursorKind.VAR_DECL:
-                    raise _SkipEntity(
-                        f"static data member {child.spelling!r} (declare it "
-                        "in a separate extern block with its qualified name "
-                        "if needed)"
-                    )
-                # DESTRUCTOR / access specifiers / static asserts: ignore.
-            except (UnsupportedTypeError, _SkipEntity) as err:
-                reason = getattr(err, "reason", None) or str(err)
-                self.module.warnings.append(
-                    f"{cursor.spelling}.{child.spelling}: skipped ({reason})"
-                )
+        finally:
+            self.mapper.pop_scope()
 
-        has_members = has_members or bool(
+        has_members = bool(
             cls.methods or cls.constructors or cls.bases or cls.template_params
             or cls.typedefs or cls.nested_classes or cls.enums
         )
@@ -373,10 +452,11 @@ class _Lowering:
         )
         return cls
 
-    def _lower_union(self, cursor) -> ir.Class:
+    def _lower_union(self, cursor, register: bool = True) -> ir.Class:
         """Lower a NAMED union to a fields-only ``cdef union`` declaration."""
         union = ir.Class(name=cursor.spelling, is_union=True)
-        self.declared.add(cursor.spelling)
+        if register:
+            self.declared.add(cursor.spelling)
         for child in cursor.get_children():
             if child.kind != CursorKind.FIELD_DECL:
                 if child.kind in (
@@ -412,7 +492,7 @@ class _Lowering:
             )
         )
 
-    def _flatten_anonymous(self, cursor, cls: ir.Class, _parent_hashes=None) -> None:
+    def _flatten_anonymous(self, cursor, cls: ir.Class) -> None:
         """Flatten fields of an anonymous union/struct into the parent.
 
         Records that type a named field at THIS level are not flattened
@@ -483,7 +563,7 @@ class _Lowering:
 
     def _lower_params(self, cursor) -> List[ir.Param]:
         params = []
-        for arg in cursor.get_arguments():
+        for i, arg in enumerate(cursor.get_arguments()):
             # A real default argument introduces a top-level '=' token in the
             # parameter declaration.  Expression *children* alone are not
             # evidence: array dimensions (float mat[16]) and non-type
@@ -493,27 +573,39 @@ class _Lowering:
                 tok.spelling == "=" for tok in arg.get_tokens()
             )
             atype = arg.type
-            dims = 0
-            while atype.kind == TypeKind.CONSTANTARRAY:
+            dims: List[str] = []
+            if atype.kind == TypeKind.INCOMPLETEARRAY:
+                dims.append("")
                 atype = atype.get_array_element_type()
-                dims += 1
-            spelled = self._type(atype) + "*" * dims
+            while atype.kind == TypeKind.CONSTANTARRAY:
+                dims.append(str(atype.get_array_size()))
+                atype = atype.get_array_element_type()
+            spelled = self._type(atype)
+            name = arg.spelling or ""
+            if len(dims) == 1 and dims[0] != "":
+                # 1-D arrays decay to a pointer (semantically identical).
+                spelled += "*"
+                dims = []
+            elif dims and not name:
+                # Multi-dim arrays keep their dims and need a declarator name.
+                name = f"arg{i}"
             params.append(
                 ir.Param(
                     type=spelled,
-                    name=arg.spelling or "",
+                    name=name,
                     has_default=has_default,
+                    array_dims=dims,
                 )
             )
         return params
 
-    def _lower_enum(self, cursor) -> ir.Enum:
+    def _lower_enum(self, cursor, register: bool = True) -> ir.Enum:
         # Anonymous enums must not leak libclang's "(unnamed enum at ...)"
         # placeholder; an empty name renders as `cdef enum:` / `enum:`.
         name = cursor.spelling
         if cursor.is_anonymous() or name.startswith("("):
             name = ""
-        else:
+        elif register:
             self.declared.add(name)
         enum = ir.Enum(
             name=name,
@@ -531,7 +623,24 @@ class _Lowering:
 
     # ------------------------------------------------------------- helpers
     def _type(self, t) -> str:
-        return self.mapper.cython_type(t.spelling)
+        """Translate a clang Type, falling back to its canonical spelling.
+
+        The sugared spelling is preferred (it keeps declared typedef names),
+        but when it references something this pxd does not declare — e.g. a
+        typedef living in an included header — the canonical spelling often
+        resolves to declarable types (``uindex_t`` -> ``unsigned int``,
+        ``Indices`` -> ``std::vector<int, ...>`` -> ``vector[int]``).
+        """
+        try:
+            return self.mapper.cython_type(t.spelling)
+        except UnsupportedTypeError as first_err:
+            canonical = t.get_canonical()
+            if canonical.spelling != t.spelling:
+                try:
+                    return self.mapper.cython_type(canonical.spelling)
+                except UnsupportedTypeError:
+                    raise first_err from None
+            raise
 
     def _in_main_file(self, cursor) -> bool:
         loc = cursor.location
@@ -559,15 +668,11 @@ class _Lowering:
         self.module.block_for(namespace).entities.append(entity)
 
     @staticmethod
-    def _is_public(cursor, parent) -> bool:
+    def _is_public(cursor) -> bool:
         access = cursor.access_specifier
         if access == AccessSpecifier.INVALID:
             return True
-        if access == AccessSpecifier.PUBLIC:
-            return True
-        # struct members default to public but libclang reports the real
-        # access, so private/protected always means skip.
-        return False
+        return access == AccessSpecifier.PUBLIC
 
     @staticmethod
     def _is_deleted(cursor) -> bool:

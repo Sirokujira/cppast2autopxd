@@ -127,15 +127,34 @@ class TypeMapper:
     # Extra user mappings, keyed by fully qualified C++ name.
     substitutions: Dict[str, Substitution] = field(default_factory=dict)
     cimports: Set[str] = field(default_factory=set)
+    # Names declared in the generated pxd (shared with the parser) plus
+    # names brought in via extra cimports.  A bare identifier that is not a
+    # builtin, not in a mapping table, and not in here is NOT quietly passed
+    # through: it would produce a pxd Cython rejects, so it raises instead
+    # (the parser then skips the enclosing declaration with a warning).
+    known_names: Set[str] = field(default_factory=set)
+    # Scope stack for template parameters and class-local names.
+    scopes: List[Set[str]] = field(default_factory=list)
 
     # ------------------------------------------------------------------ API
     def cython_type(self, spelling: str) -> str:
         """Translate a C++ type spelling into a Cython type expression.
 
         Raises :class:`UnsupportedTypeError` for constructs Cython cannot
-        declare (rvalue references, function pointers, ...).
+        declare (rvalue references, function pointers, undeclared names...).
         """
         return self._translate(spelling.strip())
+
+    def push_scope(self, names: Set[str]) -> None:
+        self.scopes.append(names)
+
+    def pop_scope(self) -> None:
+        self.scopes.pop()
+
+    def _is_known(self, name: str) -> bool:
+        if name in self.known_names:
+            return True
+        return any(name in scope for scope in self.scopes)
 
     # ------------------------------------------------------------ internals
     def _translate(self, s: str) -> str:
@@ -195,25 +214,51 @@ class TypeMapper:
             return sub.cython + self._render_args(args, keep=len(args))
 
         if args is None:
-            if base in _STD_SIMPLE:
-                cy, imp = _STD_SIMPLE[base]
-                if imp:
-                    self.cimports.add(imp)
-                return cy
+            hit = self._std_simple(base)
+            if hit is not None:
+                return hit
             if base in _STDINT or base.removeprefix("std::") in _STDINT:
                 short = base.removeprefix("std::")
                 self.cimports.add(f"from libc.stdint cimport {short}")
                 return short
-            return self._strip_local_namespace(base)
+            return self._resolve_plain(base)
 
-        if name in _STD_TEMPLATES:
-            cy, imp, keep = _STD_TEMPLATES[name]
-            self.cimports.add(imp)
-            return cy + self._render_args(args, keep=keep)
-
-        return self._strip_local_namespace(name) + self._render_args(
+        hit = self._std_template(name, args)
+        if hit is not None:
+            return hit
+        return self._resolve_plain(name) + self._render_args(
             args, keep=len(args)
         )
+
+    def _std_simple(self, name: str) -> Optional[str]:
+        """Look up a non-template std type, resolving unqualified aliases
+        spelled inside a wrapped namespace against the qualified keys."""
+        candidates = [name]
+        if "::" not in name:
+            candidates += [f"{ns}::{name}" for ns in sorted(self.local_namespaces)]
+            candidates.append(f"std::{name}")
+        for cand in candidates:
+            if cand in _STD_SIMPLE:
+                cy, imp = _STD_SIMPLE[cand]
+                if imp:
+                    self.cimports.add(imp)
+                return cy
+        return None
+
+    def _std_template(self, name: str, args: List[str]) -> Optional[str]:
+        """Look up a std/smart-pointer template, resolving unqualified alias
+        template names (``shared_ptr<T>`` spelled inside namespace pcl)
+        against the qualified keys (``pcl::shared_ptr``)."""
+        candidates = [name]
+        if "::" not in name:
+            candidates += [f"{ns}::{name}" for ns in sorted(self.local_namespaces)]
+            candidates.append(f"std::{name}")
+        for cand in candidates:
+            if cand in _STD_TEMPLATES:
+                cy, imp, keep = _STD_TEMPLATES[cand]
+                self.cimports.add(imp)
+                return cy + self._render_args(args, keep=keep)
+        return None
 
     def _render_args(self, args: List[str], keep: int) -> str:
         kept = args[:keep] if keep else args
@@ -230,23 +275,36 @@ class TypeMapper:
         rendered = ", ".join(self._translate(a) for a in kept)
         return f"[{rendered}]"
 
-    def _strip_local_namespace(self, name: str) -> str:
-        """Strip namespace qualifiers that the pxd declares locally.
+    def _resolve_plain(self, name: str) -> str:
+        """Resolve a (possibly qualified) record/enum/typedef name.
 
-        ``pcl::PointXYZ`` -> ``PointXYZ`` when "pcl" is a local namespace.
-        Unknown qualified names keep only their last component (Cython has no
-        ``::`` syntax; cross-pxd references must go through substitutions or
-        cimports).
+        - Bare identifiers must be declared in this pxd (``known_names``, a
+          scope, or brought in via cimports) — anything else raises so the
+          parser can skip the enclosing declaration WITH a warning instead
+          of emitting text Cython rejects.
+        - ``pcl::PointXYZ`` -> ``PointXYZ`` when "pcl" is a local namespace.
+        - ``Outer::Inner`` -> ``Outer.Inner`` when ``Outer`` is a class
+          declared in this pxd (Cython's nested-type syntax).
         """
-        if "::" not in name:
-            return name
-        parts = name.split("::")
-        if parts[0] in self.local_namespaces:
-            return parts[-1]
-        raise UnsupportedTypeError(
-            f"unmapped qualified type {name!r}: add it to "
-            f"[typemap.substitutions] or wrap its namespace"
-        )
+        parts = [p for p in name.split("::") if p]
+        if not parts:
+            raise UnsupportedTypeError(f"could not resolve type {name!r}")
+        # Strip the longest local-namespace prefix (handles nested wrapped
+        # namespaces like pcl::io as well as plain pcl).
+        for cut in range(len(parts) - 1, 0, -1):
+            if "::".join(parts[:cut]) in self.local_namespaces:
+                parts = parts[cut:]
+                break
+        if not parts:
+            raise UnsupportedTypeError(f"could not resolve type {name!r}")
+        head = parts[0]
+        if not self._is_known(head):
+            raise UnsupportedTypeError(
+                f"{name!r} is not declared in this pxd: wrap its header, "
+                "add a [typemap.substitutions] entry, or bring it in via "
+                "extra cimports"
+            )
+        return ".".join(parts)
 
 
 # ---------------------------------------------------------------- helpers
