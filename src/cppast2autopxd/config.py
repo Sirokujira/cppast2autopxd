@@ -48,16 +48,23 @@ class HeaderJob:
     include_names: List[str] = field(default_factory=list)
     exclude_names: List[str] = field(default_factory=list)
     extra_cimports: List[str] = field(default_factory=list)
+    # Per-header override of [generator].language ("c" or "c++").
+    language: Optional[str] = None
 
 
 @dataclass
 class GeneratorConfig:
     std: str = "c++14"
+    # "c++" or "c"; per-header override via the job's `language` key.
+    language: str = "c++"
+    # Export simple integer #define constants as an anonymous enum.
+    macros: bool = True
     include_dirs: List[str] = field(default_factory=list)
     defines: List[str] = field(default_factory=list)
     extra_args: List[str] = field(default_factory=list)
     nogil: bool = True
-    except_plus: bool = True
+    # None = auto (True for C++, False for C).
+    except_plus: Optional[bool] = None
     substitutions: Dict[str, Substitution] = field(default_factory=dict)
     headers: List[HeaderJob] = field(default_factory=list)
     # Directory all relative paths resolve against.
@@ -70,13 +77,16 @@ def load_config(path: str) -> GeneratorConfig:
 
     base_dir = os.path.dirname(os.path.abspath(path))
     gen = data.get("generator", {})
+    except_plus = gen.get("except_plus")
     cfg = GeneratorConfig(
         std=gen.get("std", "c++14"),
+        language=gen.get("language", "c++"),
+        macros=bool(gen.get("macros", True)),
         include_dirs=[_resolve(base_dir, p) for p in gen.get("include_dirs", [])],
         defines=list(gen.get("defines", [])),
         extra_args=list(gen.get("extra_args", [])),
         nogil=bool(gen.get("nogil", True)),
-        except_plus=bool(gen.get("except_plus", True)),
+        except_plus=None if except_plus is None else bool(except_plus),
         base_dir=base_dir,
     )
 
@@ -99,6 +109,7 @@ def load_config(path: str) -> GeneratorConfig:
                 include_names=list(h.get("include", [])),
                 exclude_names=list(h.get("exclude", [])),
                 extra_cimports=list(h.get("extra_cimports", [])),
+                language=h.get("language"),
             )
         )
     return cfg

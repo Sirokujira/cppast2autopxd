@@ -16,15 +16,27 @@ smart pointers and STL containers.
 
 ## Features
 
+- **C and C++** input (`--language c` for plain C headers: no `except +`,
+  `_Bool` → `bint`, no C++ distutils line)
 - `cdef extern from "header" namespace "ns" nogil:` blocks per namespace
 - Classes / structs → `cdef cppclass` (plain data structs → `cdef struct`)
-- Class templates → `cdef cppclass Name[T]`, member typedefs (`Ptr` aliases)
-- Enums (plain, `enum class`, and anonymous), typedefs, `using` aliases,
-  free functions, named unions, `extern "C"` blocks, nested classes/enums/
-  unions inside classes
+- Class templates → `cdef cppclass Name[T]` (non-type parameters declared by
+  name: `VectorD[ScalarT, dimension_t]`), defaulted parameters as `Alloc=*`,
+  member typedefs (`Ptr` aliases)
+- Free function templates → `T clamp[T](T v, T lo, T hi)`
+- Function pointers: typedefs (`ctypedef int (*cb)(int)`), struct fields,
+  and inline parameters; C varargs (`printf(const char*, ...)`)
+- Enums (plain, `enum class`, and anonymous) with `= value` members;
+  `typedef struct {...} Name;` / `typedef enum {...} Name;` C idioms
+- Simple integer `#define` constants exported as an anonymous enum
+- Bit-fields emitted as plain fields (layout stays with the C compiler)
+- typedefs, `using` aliases, free functions, named unions, `extern "C"`
+  blocks, nested classes/enums/unions inside classes, `operator bool()`
 - `std::` type mapping with automatic cimports (`vector`, `map`, `string`,
-  `shared_ptr`, `pair`, stdint types, ...); default template arguments such as
-  allocators are dropped to match Cython's `libcpp` declarations
+  `shared_ptr`, `pair`, `function`, `optional`, `atomic`, `complex`, stdint
+  families, curated libc symbols like `time_t`/`FILE`, ...); default template
+  arguments such as allocators are dropped to match Cython's `libcpp`
+  declarations; `std::function<int(int)>` renders as `function[int(int)]`
 - `boost::shared_ptr` / `pcl::shared_ptr` mapped to `shared_ptr`
 - Anonymous union/struct flattening (PCL point types' SSE-padded unions)
 - C++ default arguments expanded into Cython-visible overloads

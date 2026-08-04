@@ -29,6 +29,7 @@ from __future__ import annotations
 import functools
 import glob
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field as dc_field
@@ -59,6 +60,10 @@ class ParseOptions:
     include_dirs: List[str] = dc_field(default_factory=list)
     defines: List[str] = dc_field(default_factory=list)
     std: str = "c++14"
+    # "c++" or "c" (plain C headers: no namespaces, bint for _Bool, ...).
+    language: str = "c++"
+    # Export simple object-like integer macro constants as an anonymous enum.
+    macros: bool = True
     extra_args: List[str] = dc_field(default_factory=list)
     # Namespaces to export; empty means every namespace found in the file.
     namespaces: List[str] = dc_field(default_factory=list)
@@ -120,19 +125,27 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
         raise ParseError(f"header not found: {path}")
     main_abs = os.path.realpath(path)
 
+    std = options.std
+    if options.language == "c" and std.startswith("c++"):
+        std = "c11"
+
     index = cindex.Index.create()
-    args = ["-x", "c++", f"-std={options.std}"]
+    args = ["-x", options.language, f"-std={std}"]
     args += list(_builtin_include_args())
     args += [f"-I{d}" for d in options.include_dirs]
     args += [f"-D{d}" for d in options.defines]
     args += options.extra_args
+
+    parse_flags = cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES
+    if options.macros:
+        parse_flags |= cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
 
     try:
         tu = index.parse(
             _WRAPPER_NAME,
             args=args,
             unsaved_files=[(_WRAPPER_NAME, f'#include "{main_abs}"\n')],
-            options=cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES,
+            options=parse_flags,
         )
     except cindex.TranslationUnitLoadError as err:
         raise ParseError(f"libclang failed to parse {path}: {err}") from err
@@ -155,7 +168,50 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
 
     lowering = _Lowering(module, options, mapper, main_abs)
     lowering.visit_children(tu.cursor, namespace="")
+    if options.macros:
+        _collect_macro_constants(tu, module, main_abs)
     return module
+
+
+#: Integer literal (dec/hex/oct/bin) with optional C suffixes.
+_INT_LITERAL_RE = re.compile(r"(0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)[uUlL]*$")
+
+
+def _collect_macro_constants(tu, module: ir.Module, main_file: str) -> None:
+    """Export ``#define NAME <int>`` macros as an anonymous enum block.
+
+    Only simple object-like macros whose replacement is a (possibly signed
+    or parenthesized) integer literal qualify — the reliable subset that an
+    anonymous ``cdef enum:`` can carry.
+    """
+    items: List[ir.EnumItem] = []
+    for cursor in tu.cursor.get_children():
+        if cursor.kind != CursorKind.MACRO_DEFINITION:
+            continue
+        loc = cursor.location
+        if loc.file is None or os.path.realpath(loc.file.name) != main_file:
+            continue
+        tokens = [t.spelling for t in cursor.get_tokens()]
+        if len(tokens) < 2 or tokens[0] != cursor.spelling:
+            continue
+        body = tokens[1:]
+        # strip one level of parentheses: #define X (42)
+        if len(body) >= 3 and body[0] == "(" and body[-1] == ")":
+            body = body[1:-1]
+        sign = ""
+        if body and body[0] in ("-", "+"):
+            sign = body[0] if body[0] == "-" else ""
+            body = body[1:]
+        if len(body) != 1:
+            continue
+        m = _INT_LITERAL_RE.match(body[0])
+        if not m:
+            continue
+        items.append(ir.EnumItem(name=cursor.spelling, value=sign + m.group(1)))
+    if items:
+        block = ir.NamespaceBlock(namespace="")
+        block.entities.append(ir.Enum(name="", items=items))
+        module.blocks.append(block)
 
 
 class _SkipEntity(Exception):
@@ -243,10 +299,10 @@ class _Lowering:
                         ),
                     )
             elif kind == CursorKind.FUNCTION_TEMPLATE:
-                raise _SkipEntity(
-                    f"function template {cursor.spelling!r} "
-                    "(not declarable in Cython pxd)"
-                )
+                if self._name_selected(cursor.spelling):
+                    self._add(
+                        namespace, self._lower_function_template(cursor)
+                    )
             elif kind == CursorKind.TYPE_ALIAS_TEMPLATE_DECL:
                 raise _SkipEntity(
                     f"alias template {cursor.spelling!r} "
@@ -267,6 +323,10 @@ class _Lowering:
 
     def _visit_record(self, cursor, namespace: str) -> None:
         name = cursor.spelling
+        if cursor.is_definition() and cursor.is_anonymous():
+            # `typedef struct {...} Name;` — the typedef visit names and
+            # lowers it; a truly anonymous top-level record is unreachable.
+            return
         if not cursor.is_definition():
             # Forward declaration.  When the definition follows in this same
             # file it will be lowered there; otherwise declare the name as
@@ -276,7 +336,14 @@ class _Lowering:
                 return
             if name and self._name_selected(name) and name not in self.declared:
                 self.declared.add(name)
-                self._add(namespace, ir.Class(name=name))
+                self._add(
+                    namespace,
+                    ir.Class(
+                        name=name,
+                        # C has no classes; an opaque C record is a struct.
+                        is_pod_struct=self.options.language == "c",
+                    ),
+                )
             return
         if not self._name_selected(name):
             return
@@ -316,27 +383,29 @@ class _Lowering:
             # ---- template parameters and bases
             for child in children:
                 kind = child.kind
-                if kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
+                if kind in (
+                    CursorKind.TEMPLATE_TYPE_PARAMETER,
+                    CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
+                ):
                     if any(t.spelling == "..." for t in child.get_tokens()):
                         raise _SkipEntity(
                             f"variadic class template {cursor.spelling!r} "
                             "(parameter packs not declarable in Cython)"
                         )
-                    # A defaulted template parameter must carry `=*` (the
-                    # one legitimate use of that marker) or use sites
-                    # passing fewer arguments fail to compile.
+                    # Non-type parameters are declared by NAME (Cython's
+                    # numeric-template-parameter convention, e.g.
+                    # VectorD[ScalarT, dimension_t]); defaulted parameters
+                    # must carry `=*` (the one legitimate use of that
+                    # marker) or use sites passing fewer arguments fail.
                     param = child.spelling
                     scope.add(param)
                     if any(t.spelling == "=" for t in child.get_tokens()):
                         param += "=*"
                     cls.template_params.append(param)
-                elif kind in (
-                    CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
-                    CursorKind.TEMPLATE_TEMPLATE_PARAMETER,
-                ):
+                elif kind == CursorKind.TEMPLATE_TEMPLATE_PARAMETER:
                     raise _SkipEntity(
                         f"class template {cursor.spelling!r} uses a "
-                        "non-type/template template parameter "
+                        "template template parameter "
                         "(not declarable in Cython)"
                     )
                 elif kind == CursorKind.CXX_BASE_SPECIFIER:
@@ -382,14 +451,24 @@ class _Lowering:
                     continue
                 if child.kind in (CursorKind.TYPEDEF_DECL, CursorKind.TYPE_ALIAS_DECL):
                     try:
-                        cls.typedefs.append(
-                            ir.MemberTypedef(
-                                name=child.spelling,
-                                underlying=self._type(
-                                    child.underlying_typedef_type
-                                ),
+                        try:
+                            underlying = self._type(
+                                child.underlying_typedef_type
                             )
-                        )
+                            td = ir.MemberTypedef(
+                                name=child.spelling, underlying=underlying
+                            )
+                        except UnsupportedTypeError:
+                            fp = self._function_pointer_decl(
+                                child.underlying_typedef_type,
+                                child.spelling, source_cursor=child,
+                            )
+                            if fp is None:
+                                raise
+                            td = ir.MemberTypedef(
+                                name=child.spelling, underlying="", raw=fp
+                            )
+                        cls.typedefs.append(td)
                         scope.add(child.spelling)
                     except UnsupportedTypeError as err:
                         self.module.warnings.append(
@@ -398,6 +477,9 @@ class _Lowering:
                         )
 
             # ---- pass 3: constructors, fields, methods
+            # const/non-const overload pairs collapse to one declaration
+            # (Cython rejects two methods differing only in constness).
+            seen_signatures: Set[tuple] = set()
             for child in children:
                 if not self._is_public(child):
                     continue
@@ -418,7 +500,15 @@ class _Lowering:
                     elif kind == CursorKind.CXX_METHOD:
                         method = self._lower_method(child)
                         if method is not None:
-                            cls.methods.append(method)
+                            sig = (
+                                method.name,
+                                tuple(p.raw or p.type for p in method.params),
+                            )
+                            if sig not in seen_signatures:
+                                seen_signatures.add(sig)
+                                cls.methods.append(method)
+                    elif kind == CursorKind.CONVERSION_FUNCTION:
+                        cls.methods.append(self._lower_conversion(child))
                     elif kind == CursorKind.CONSTRUCTOR:
                         ctor = self._lower_constructor(child)
                         if ctor is not None:
@@ -477,16 +567,34 @@ class _Lowering:
         return union
 
     def _lower_field(self, cursor, cls: ir.Class) -> None:
+        # Bit-fields emit as plain fields: Cython has no width syntax, but
+        # access still compiles against the real header's layout.
         ftype = cursor.type
         dims: List[str] = []
         while ftype.kind == TypeKind.CONSTANTARRAY:
             dims.append(str(ftype.get_array_size()))
             ftype = ftype.get_array_element_type()
-        if ftype.kind == TypeKind.INCOMPLETEARRAY:
-            raise UnsupportedTypeError("incomplete array field")
+        if ftype.kind in (
+            TypeKind.INCOMPLETEARRAY,
+            TypeKind.DEPENDENTSIZEDARRAY,
+            TypeKind.VARIABLEARRAY,
+        ):
+            raise UnsupportedTypeError("unsupported array field")
+        try:
+            spelled = self._type(ftype)
+        except UnsupportedTypeError:
+            fp = self._function_pointer_decl(
+                ftype, cursor.spelling, source_cursor=cursor
+            )
+            if fp is None or dims:
+                raise
+            cls.fields.append(
+                ir.Field(type="", name=cursor.spelling, raw=fp)
+            )
+            return
         cls.fields.append(
             ir.Field(
-                type=self._type(ftype),
+                type=spelled,
                 name=cursor.spelling,
                 array_dims=dims,
             )
@@ -532,8 +640,6 @@ class _Lowering:
             is_operator = False
         if self._is_deleted(cursor):
             return None
-        if cursor.type.is_function_variadic():
-            raise _SkipEntity(f"variadic function {name!r}")
         return ir.Method(
             name=name,
             return_type=self._type(cursor.result_type),
@@ -541,6 +647,21 @@ class _Lowering:
             is_static=cursor.is_static_method(),
             is_const=cursor.is_const_method(),
             is_operator=is_operator,
+        )
+
+    def _lower_conversion(self, cursor) -> ir.Method:
+        """``operator bool()`` is the one conversion Cython can declare."""
+        if cursor.result_type.spelling not in ("bool", "_Bool"):
+            raise _SkipEntity(
+                f"conversion operator {cursor.spelling!r} "
+                "(only operator bool() is declarable in Cython)"
+            )
+        return ir.Method(
+            name="operator bool",
+            return_type=self.mapper.cython_type("bool"),
+            params=[],
+            is_const=cursor.is_const_method(),
+            is_operator=True,
         )
 
     def _lower_constructor(self, cursor) -> Optional[ir.Constructor]:
@@ -553,17 +674,59 @@ class _Lowering:
         return ir.Constructor(params=self._lower_params(cursor))
 
     def _lower_function(self, cursor) -> ir.Function:
-        if cursor.type.is_function_variadic():
-            raise _SkipEntity(f"variadic function {cursor.spelling!r}")
         return ir.Function(
             name=cursor.spelling,
             return_type=self._type(cursor.result_type),
             params=self._lower_params(cursor),
         )
 
+    def _lower_function_template(self, cursor) -> ir.Function:
+        """Free function templates: ``T clamp[T](T v, T lo, T hi)``."""
+        tparams: List[str] = []
+        scope: Set[str] = set()
+        for child in cursor.get_children():
+            kind = child.kind
+            if kind in (
+                CursorKind.TEMPLATE_TYPE_PARAMETER,
+                CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
+            ):
+                if any(t.spelling == "..." for t in child.get_tokens()):
+                    raise _SkipEntity(
+                        f"variadic function template {cursor.spelling!r} "
+                        "(parameter packs not declarable in Cython)"
+                    )
+                param = child.spelling
+                scope.add(param)
+                if any(t.spelling == "=" for t in child.get_tokens()):
+                    param += "=*"
+                tparams.append(param)
+            elif kind == CursorKind.TEMPLATE_TEMPLATE_PARAMETER:
+                raise _SkipEntity(
+                    f"function template {cursor.spelling!r} uses a template "
+                    "template parameter (not declarable in Cython)"
+                )
+        self.mapper.push_scope(scope)
+        try:
+            return ir.Function(
+                name=cursor.spelling,
+                return_type=self._type(cursor.result_type),
+                params=self._lower_params(cursor),
+                template_params=tparams,
+            )
+        finally:
+            self.mapper.pop_scope()
+
     def _lower_params(self, cursor) -> List[ir.Param]:
         params = []
-        for i, arg in enumerate(cursor.get_arguments()):
+        args = list(cursor.get_arguments())
+        if not args:
+            # FUNCTION_TEMPLATE cursors expose no arguments(); their
+            # parameters are PARM_DECL children.
+            args = [
+                c for c in cursor.get_children()
+                if c.kind == CursorKind.PARM_DECL
+            ]
+        for i, arg in enumerate(args):
             # A real default argument introduces a top-level '=' token in the
             # parameter declaration.  Expression *children* alone are not
             # evidence: array dimensions (float mat[16]) and non-type
@@ -573,6 +736,7 @@ class _Lowering:
                 tok.spelling == "=" for tok in arg.get_tokens()
             )
             atype = arg.type
+            name = arg.spelling or ""
             dims: List[str] = []
             if atype.kind == TypeKind.INCOMPLETEARRAY:
                 dims.append("")
@@ -580,8 +744,19 @@ class _Lowering:
             while atype.kind == TypeKind.CONSTANTARRAY:
                 dims.append(str(atype.get_array_size()))
                 atype = atype.get_array_element_type()
-            spelled = self._type(atype)
-            name = arg.spelling or ""
+            try:
+                spelled = self._type(atype)
+            except UnsupportedTypeError:
+                fp = self._function_pointer_decl(
+                    atype, name or f"arg{i}", source_cursor=arg
+                )
+                if fp is None or dims:
+                    raise
+                params.append(
+                    ir.Param(type="", name=name, raw=fp,
+                             has_default=has_default)
+                )
+                continue
             if len(dims) == 1 and dims[0] != "":
                 # 1-D arrays decay to a pointer (semantically identical).
                 spelled += "*"
@@ -597,6 +772,12 @@ class _Lowering:
                     array_dims=dims,
                 )
             )
+        if cursor.type.kind in (
+            TypeKind.FUNCTIONPROTO,
+            TypeKind.FUNCTIONNOPROTO,
+        ) and cursor.type.is_function_variadic():
+            # C varargs: Cython supports a trailing `...`.
+            params.append(ir.Param(type="..."))
         return params
 
     def _lower_enum(self, cursor, register: bool = True) -> ir.Enum:
@@ -613,13 +794,112 @@ class _Lowering:
         )
         for child in cursor.get_children():
             if child.kind == CursorKind.ENUM_CONSTANT_DECL:
-                enum.items.append(ir.EnumItem(name=child.spelling))
+                enum.items.append(
+                    ir.EnumItem(
+                        name=child.spelling, value=str(child.enum_value)
+                    )
+                )
         return enum
 
-    def _lower_typedef(self, cursor) -> ir.Typedef:
-        underlying = self._type(cursor.underlying_typedef_type)
-        self.declared.add(cursor.spelling)
-        return ir.Typedef(name=cursor.spelling, underlying=underlying)
+    def _lower_typedef(self, cursor):
+        name = cursor.spelling
+        ut = cursor.underlying_typedef_type
+
+        # `typedef struct {...} Name;` / `typedef enum {...} Name;` — the C
+        # idiom: name the anonymous definition after the typedef.
+        decl = ut.get_declaration()
+        if (
+            decl is not None
+            and decl.kind in (
+                CursorKind.STRUCT_DECL,
+                CursorKind.UNION_DECL,
+                CursorKind.ENUM_DECL,
+                CursorKind.CLASS_DECL,
+            )
+            and decl.is_definition()
+            and decl.is_anonymous()
+            and self._in_main_file(decl)
+        ):
+            if decl.kind == CursorKind.ENUM_DECL:
+                entity = self._lower_enum(decl, register=False)
+            elif decl.kind == CursorKind.UNION_DECL:
+                entity = self._lower_union(decl, register=False)
+            else:
+                entity = self._lower_class(decl, template=False)
+            entity.name = name
+            self.declared.add(name)
+            return entity
+
+        try:
+            underlying = self._type(ut)
+        except UnsupportedTypeError:
+            fp = self._function_pointer_decl(ut, name, source_cursor=cursor)
+            if fp is None:
+                raise
+            self.declared.add(name)
+            return ir.Typedef(name=name, underlying="", raw=fp)
+
+        if underlying == name:
+            # `typedef struct Foo Foo;` — the name is already declared;
+            # Cython would reject the self-referential ctypedef.
+            return None
+        self.declared.add(name)
+        return ir.Typedef(name=name, underlying=underlying)
+
+    def _function_pointer_decl(
+        self, t, name: str, source_cursor=None
+    ) -> Optional[str]:
+        """Render a function-pointer/function type as a Cython declarator
+        (``int (*name)(int a, ...)``), or None when *t* is not one.
+
+        Parameter names are recovered from *source_cursor*'s PARM_DECL
+        children when available (types alone carry no names).
+        """
+        # Prefer the sugared type so parameter types keep their declared
+        # names (item_id, not unsigned int); fall back to canonical when the
+        # sugar hides the function shape behind another alias.
+        probe = t
+        if probe.kind not in (
+            TypeKind.POINTER,
+            TypeKind.FUNCTIONPROTO,
+            TypeKind.FUNCTIONNOPROTO,
+        ):
+            probe = t.get_canonical()
+        pointer = False
+        if probe.kind == TypeKind.POINTER:
+            pointee = probe.get_pointee()
+            if pointee.kind not in (
+                TypeKind.FUNCTIONPROTO,
+                TypeKind.FUNCTIONNOPROTO,
+            ):
+                return None
+            fn = pointee
+            pointer = True
+        elif probe.kind in (
+            TypeKind.FUNCTIONPROTO,
+            TypeKind.FUNCTIONNOPROTO,
+        ):
+            fn = probe
+        else:
+            return None
+        ret = self._type(fn.get_result())
+        param_names: List[str] = []
+        if source_cursor is not None:
+            param_names = [
+                c.spelling
+                for c in source_cursor.get_children()
+                if c.kind == CursorKind.PARM_DECL
+            ]
+        args = []
+        if fn.kind == TypeKind.FUNCTIONPROTO:
+            for j, at in enumerate(fn.argument_types()):
+                spelled = self._type(at)
+                pname = param_names[j] if j < len(param_names) else ""
+                args.append(f"{spelled} {pname}".strip())
+            if fn.is_function_variadic():
+                args.append("...")
+        declarator = f"(*{name})" if pointer else name
+        return f"{ret} {declarator}({', '.join(args)})"
 
     # ------------------------------------------------------------- helpers
     def _type(self, t) -> str:

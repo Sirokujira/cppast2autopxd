@@ -19,6 +19,9 @@ class EmitOptions:
     # Add `except +` to functions/methods/constructors so C++ exceptions
     # propagate as Python exceptions instead of terminating the process.
     except_plus: bool = True
+    # C++ mode: emit the `# distutils: language = c++` header. False for
+    # plain C headers.
+    cplus: bool = True
     # Extra verbatim cimport lines (from user config).
     extra_cimports: List[str] = None
     # Banner comment; set to "" to disable.
@@ -38,8 +41,9 @@ def emit_module(
         for line in options.banner.splitlines():
             out.append(f"# {line}".rstrip())
         out.append("")
-    out.append("# distutils: language = c++")
-    out.append("")
+    if options.cplus:
+        out.append("# distutils: language = c++")
+        out.append("")
 
     all_cimports = sorted(set(cimports) | set(options.extra_cimports))
     if all_cimports:
@@ -79,11 +83,16 @@ def _emit_entity(entity, options: EmitOptions) -> List[str]:
     if isinstance(entity, ir.Enum):
         return _emit_enum(entity, indent=1)
     if isinstance(entity, ir.Typedef):
+        if entity.raw:
+            return [f"{_INDENT}ctypedef {entity.raw}"]
         return [f"{_INDENT}ctypedef {entity.underlying} {entity.name}"]
     if isinstance(entity, ir.Function):
+        name = entity.name
+        if entity.template_params:
+            name += "[" + ", ".join(entity.template_params) + "]"
         return [
             _INDENT + sig
-            for sig in _signatures(entity.return_type, entity.name,
+            for sig in _signatures(entity.return_type, name,
                                    entity.params, options)
         ]
     if isinstance(entity, ir.Variable):
@@ -133,7 +142,10 @@ def _emit_class(cls: ir.Class, options: EmitOptions, indent: int) -> List[str]:
     for nested in cls.nested_classes:
         body.extend(_emit_class(nested, options, indent + 1))
     for td in cls.typedefs:
-        body.append(f"{body_pad}ctypedef {td.underlying} {td.name}")
+        if td.raw:
+            body.append(f"{body_pad}ctypedef {td.raw}")
+        else:
+            body.append(f"{body_pad}ctypedef {td.underlying} {td.name}")
     for ctor in cls.constructors:
         for sig in _signatures("", cls.name, ctor.params, options):
             body.append(body_pad + sig)
@@ -164,11 +176,16 @@ def _emit_enum(enum: ir.Enum, indent: int) -> List[str]:
     if not enum.items:
         lines.append(f"{body_pad}pass")
     for item in enum.items:
-        lines.append(f"{body_pad}{item.name}")
+        if item.value is not None:
+            lines.append(f"{body_pad}{item.name} = {item.value}")
+        else:
+            lines.append(f"{body_pad}{item.name}")
     return lines
 
 
 def _field_decl(f: ir.Field) -> str:
+    if f.raw:
+        return f.raw
     dims = "".join(f"[{d}]" for d in f.array_dims)
     return f"{f.type} {f.name}{dims}"
 
@@ -210,6 +227,12 @@ def _one_signature(
 ) -> str:
     rendered = []
     for p in params:
+        if p.raw:
+            rendered.append(p.raw)
+            continue
+        if p.type == "...":
+            rendered.append("...")
+            continue
         part = p.type
         if p.name:
             part += f" {p.name}"

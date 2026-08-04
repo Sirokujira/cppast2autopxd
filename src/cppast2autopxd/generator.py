@@ -20,6 +20,8 @@ def generate_pxd(
     include_dirs: Optional[List[str]] = None,
     defines: Optional[List[str]] = None,
     std: str = "c++14",
+    language: str = "c++",
+    macros: bool = True,
     extra_args: Optional[List[str]] = None,
     namespaces: Optional[List[str]] = None,
     include_names: Optional[List[str]] = None,
@@ -27,10 +29,16 @@ def generate_pxd(
     substitutions=None,
     extra_cimports: Optional[List[str]] = None,
     nogil: bool = True,
-    except_plus: bool = True,
+    except_plus: Optional[bool] = None,
     banner: Optional[str] = None,
 ) -> "GenerationResult":
-    """Generate pxd text for one header. Returns text plus warnings."""
+    """Generate pxd text for one header. Returns text plus warnings.
+
+    ``except_plus`` defaults to True for C++ and False for C (`except +`
+    requires C++ compilation).
+    """
+    if except_plus is None:
+        except_plus = language != "c"
     mapper = TypeMapper(substitutions=dict(substitutions or {}))
     # Names brought in by user-supplied cimport lines are declarable.
     for line in extra_cimports or []:
@@ -39,6 +47,8 @@ def generate_pxd(
         include_dirs=list(include_dirs or []),
         defines=list(defines or []),
         std=std,
+        language=language,
+        macros=macros,
         extra_args=list(extra_args or []),
         namespaces=list(namespaces or []),
         include_names=list(include_names or []),
@@ -58,6 +68,7 @@ def generate_pxd(
         EmitOptions(
             nogil=nogil,
             except_plus=except_plus,
+            cplus=language != "c",
             extra_cimports=list(extra_cimports or []),
             banner=banner,
         ),
@@ -120,6 +131,8 @@ def generate_job(cfg: GeneratorConfig, job: HeaderJob) -> GenerationResult:
         include_dirs=cfg.include_dirs,
         defines=cfg.defines,
         std=cfg.std,
+        language=job.language or cfg.language,
+        macros=cfg.macros,
         extra_args=cfg.extra_args,
         namespaces=job.namespaces,
         include_names=job.include_names,
