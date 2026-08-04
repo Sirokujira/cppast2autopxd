@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import keyword
 from dataclasses import dataclass
 from typing import List, Set
 
@@ -235,7 +236,11 @@ def _one_signature(
             continue
         part = p.type
         if p.name:
-            part += f" {p.name}"
+            # Parameter names in extern declarations are documentation
+            # only, but Cython still parses them: Python keywords (legal
+            # C++ names like `from`) must be renamed.
+            pname = p.name + "_" if keyword.iskeyword(p.name) else p.name
+            part += f" {pname}"
         part += "".join(f"[{d}]" for d in p.array_dims)
         rendered.append(part)
     sig = f"{name}({', '.join(rendered)})"

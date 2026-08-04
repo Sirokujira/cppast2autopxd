@@ -15,6 +15,7 @@ once and then owned by humans.
 
 from __future__ import annotations
 
+import keyword
 from typing import List, Optional, Set
 
 from . import ir
@@ -175,7 +176,7 @@ def _render_class(cls: ir.Class) -> Optional[List[str]]:
     ctor = _pick_ctor(cls)
     if ctor is not None:
         args = _py_params(ctor.params)
-        call = ", ".join(p.name or f"arg{i}" for i, p in enumerate(ctor.params))
+        call = ", ".join(_to_cpp_arg(p, i) for i, p in enumerate(ctor.params))
         lines.append(f"    def __cinit__(self{args}):")
         lines.append(f"        self.thisptr = new cpp.{cls.name}({call})")
     else:
@@ -226,18 +227,30 @@ def _pick_ctor(cls: ir.Class) -> Optional[ir.Constructor]:
     return best
 
 
+def _safe_name(p: ir.Param, i: int) -> str:
+    """Python-side name for a C++ parameter.
+
+    C++ headers freely use names that are reserved in Python (``self``,
+    ``lambda``, ``from``, ...); a trailing underscore keeps the scaffold
+    compilable while staying recognizable.
+    """
+    name = p.name or f"arg{i}"
+    if name == "self" or keyword.iskeyword(name):
+        name += "_"
+    return name
+
+
 def _py_params(params: List[ir.Param]) -> str:
     parts = []
     for i, p in enumerate(params):
-        name = p.name or f"arg{i}"
         # C-typed parameters both disambiguate C++ overloads and document
         # the expected Python types.
-        parts.append(f"{_cy_param_type(p.type)} {name}")
+        parts.append(f"{_cy_param_type(p.type)} {_safe_name(p, i)}")
     return (", " + ", ".join(parts)) if parts else ""
 
 
 def _to_cpp_arg(p: ir.Param, i: int) -> str:
-    name = p.name or f"arg{i}"
+    name = _safe_name(p, i)
     if _uses_string(p.type):
         return f"<string> {name}.encode()"
     return name

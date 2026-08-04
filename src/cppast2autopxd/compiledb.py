@@ -37,6 +37,7 @@ class CompileCommand:
     file: str          # absolute path of the TU
     directory: str     # working directory of the invocation
     args: List[str]    # full argv (compiler included)
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +50,7 @@ class ExtractedFlags:
     # -isystem/-isysroot/--sysroot and friends, passed through verbatim.
     extra_args: List[str] = field(default_factory=list)
     source_file: str = ""
+    warnings: List[str] = field(default_factory=list)
 
 
 def load_compile_db(path: str) -> List[CompileCommand]:
@@ -79,8 +81,12 @@ def load_compile_db(path: str) -> List[CompileCommand]:
             args = _split_command(entry["command"])
         else:
             continue
+        args, warnings = _expand_response_files(args, directory)
         commands.append(
-            CompileCommand(file=file_path, directory=directory, args=args)
+            CompileCommand(
+                file=file_path, directory=directory, args=args,
+                warnings=warnings,
+            )
         )
     if not commands:
         raise CompileDbError(f"compilation database is empty: {path}")
@@ -103,6 +109,33 @@ def _split_command(command: str) -> List[str]:
             for p in parts
         ]
     return shlex.split(command)
+
+
+def _expand_response_files(args, directory):
+    """Expand ``@file.rsp`` arguments (CMake/Ninja long-command-line form).
+
+    Unreadable response files surface as warnings — flags silently lost to
+    an unexpanded @file would otherwise yield confusing parse failures or
+    silently wrong output.
+    """
+    out: List[str] = []
+    warnings: List[str] = []
+    for arg in args:
+        if not arg.startswith("@") or len(arg) < 2:
+            out.append(arg)
+            continue
+        rsp_path = _resolve(directory, arg[1:])
+        try:
+            with open(rsp_path, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except OSError as err:
+            warnings.append(
+                f"compile db: response file {arg!r} could not be read "
+                f"({err}); its flags are missing"
+            )
+            continue
+        out.extend(_split_command(content))
+    return out, warnings
 
 
 def flags_for(header: str, commands: List[CompileCommand]) -> ExtractedFlags:
@@ -128,7 +161,9 @@ def _common_prefix_len(a: str, b: str) -> int:
 
 
 def _extract(cmd: CompileCommand) -> ExtractedFlags:
-    out = ExtractedFlags(source_file=cmd.file)
+    out = ExtractedFlags(
+        source_file=cmd.file, warnings=list(cmd.warnings)
+    )
     args = cmd.args[1:]  # drop the compiler executable
     i = 0
     while i < len(args):
@@ -155,15 +190,23 @@ def _extract(cmd: CompileCommand) -> ExtractedFlags:
             out.std = arg[len("-std="):]
         elif arg in ("-isystem", "-isysroot"):
             out.extra_args += [arg, _resolve(cmd.directory, _value())]
-        elif arg.startswith("--sysroot"):
-            out.extra_args.append(arg)
+        elif arg == "--sysroot":
+            # clang's separate-argument spelling
+            out.extra_args += [arg, _resolve(cmd.directory, _value())]
+        elif arg.startswith("--sysroot="):
+            out.extra_args.append(
+                "--sysroot="
+                + _resolve(cmd.directory, arg[len("--sysroot="):])
+            )
         elif arg.startswith("--target=") or arg.startswith("-target"):
             if arg == "-target":
                 out.extra_args += [arg, _value()]
             else:
                 out.extra_args.append(arg)
-        elif arg in ("-c", "-o"):
-            i += 1  # skip the value; irrelevant for parsing
+        elif arg == "-o":
+            i += 1  # -o takes a value; irrelevant for parsing
+        elif arg == "-c":
+            pass    # compile-only marker: takes NO value
         # everything else (warnings, optimization, deps generation, the
         # source file itself) is irrelevant for header parsing
         i += 1

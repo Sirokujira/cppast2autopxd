@@ -19,7 +19,7 @@ def generate_pxd(
     extern_from: Optional[str] = None,
     include_dirs: Optional[List[str]] = None,
     defines: Optional[List[str]] = None,
-    std: str = "c++14",
+    std: Optional[str] = None,
     language: str = "c++",
     macros: bool = True,
     extra_args: Optional[List[str]] = None,
@@ -43,10 +43,14 @@ def generate_pxd(
     standard, and sysroot flags are then taken from the best-matching
     database entry — explicitly passed values are kept and take
     precedence, the database appends.
+
+    ``std=None`` means: the database's ``-std=`` if one applies,
+    otherwise ``c++14``. Passing a standard explicitly always wins.
     """
     if except_plus is None:
         except_plus = language != "c"
 
+    db_warnings: List[str] = []
     if compile_db:
         from .compiledb import flags_for, load_compile_db
 
@@ -54,10 +58,11 @@ def generate_pxd(
         include_dirs = list(include_dirs or []) + db_flags.include_dirs
         defines = list(defines or []) + db_flags.defines
         extra_args = list(extra_args or []) + db_flags.extra_args
-        # The database standard applies unless the caller overrode the
-        # default explicitly.
-        if db_flags.std and std == "c++14":
+        db_warnings = list(db_flags.warnings)
+        if std is None:
             std = db_flags.std
+    if std is None:
+        std = "c++14"
 
     mapper = TypeMapper(substitutions=dict(substitutions or {}))
     # Names brought in by user-supplied cimport lines are declarable.
@@ -94,7 +99,8 @@ def generate_pxd(
         ),
     )
     return GenerationResult(
-        text=text, warnings=list(module.warnings), module=module
+        text=text, warnings=db_warnings + list(module.warnings),
+        module=module,
     )
 
 
@@ -131,6 +137,40 @@ def _imported_names(cimport_line: str) -> List[str]:
     return names
 
 
+def derive_pxd_module(output: str) -> str:
+    """Dotted cimport path of a generated pxd, from its file location.
+
+    Walks up from the output file while ``__init__.pxd``/``__init__.py``
+    mark package directories, so ``src/pcl/pxd/point_types.pxd`` becomes
+    ``pcl.pxd.point_types``. Inside a package layout the bare basename
+    would cimport the wrong module (or nothing at all).
+    """
+    parts = [os.path.splitext(os.path.basename(output))[0]]
+    d = os.path.dirname(os.path.abspath(output))
+    while any(
+        os.path.exists(os.path.join(d, init))
+        for init in ("__init__.pxd", "__init__.py")
+    ):
+        parts.insert(0, os.path.basename(d))
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return ".".join(parts)
+
+
+def scaffold_collides(pyx_path: str, pxd_path: str) -> bool:
+    """True when the scaffold would form the SAME Cython module as the pxd.
+
+    A ``foo.pyx`` next to ``foo.pxd`` makes Cython treat the pxd as the
+    pyx's own declaration file — ``cimport``-ing it from itself then
+    fails. The scaffold must live under a different module name.
+    """
+    a = os.path.splitext(os.path.abspath(pyx_path))[0]
+    b = os.path.splitext(os.path.abspath(pxd_path))[0]
+    return a == b
+
+
 def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
     """Run every header job in a config. Returns all warnings."""
     all_warnings: List[str] = []
@@ -147,6 +187,12 @@ def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
         all_warnings.extend(result.warnings)
 
         if job.pyx_scaffold:
+            if scaffold_collides(job.pyx_scaffold, job.output):
+                raise ValueError(
+                    f"pyx_scaffold {job.pyx_scaffold!r} and output "
+                    f"{job.output!r} would form the same Cython module; "
+                    "give the scaffold a different name (e.g. _wrap.pyx)"
+                )
             if os.path.exists(job.pyx_scaffold):
                 if verbose:
                     print(
@@ -156,9 +202,7 @@ def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
             else:
                 from .pyx_scaffold import render_scaffold
 
-                pxd_module = job.pxd_module or os.path.splitext(
-                    os.path.basename(job.output)
-                )[0]
+                pxd_module = job.pxd_module or derive_pxd_module(job.output)
                 text = render_scaffold(
                     result.module,
                     pxd_module,
