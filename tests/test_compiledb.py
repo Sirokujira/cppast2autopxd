@@ -108,9 +108,11 @@ def test_generation_driven_entirely_by_db(tmp_path):
         }
     """))
     (src_dir / "api.cpp").write_text('#include "api.h"\n')
+    # CMake writes forward-slash paths on every platform; mirror that so
+    # the 'command' string stays shell-splittable on Windows too.
     db = _write_db(tmp_path, [{
         "directory": str(tmp_path),
-        "command": f"g++ -I{inc} -DUNUSED=1 -std=c++17 -c src/api.cpp",
+        "command": f"g++ -I{inc.as_posix()} -DUNUSED=1 -std=c++17 -c src/api.cpp",
         "file": "src/api.cpp",
     }])
 

@@ -76,7 +76,7 @@ def load_compile_db(path: str) -> List[CompileCommand]:
         if "arguments" in entry:
             args = list(entry["arguments"])
         elif "command" in entry:
-            args = shlex.split(entry["command"])
+            args = _split_command(entry["command"])
         else:
             continue
         commands.append(
@@ -85,6 +85,24 @@ def load_compile_db(path: str) -> List[CompileCommand]:
     if not commands:
         raise CompileDbError(f"compilation database is empty: {path}")
     return commands
+
+
+def _split_command(command: str) -> List[str]:
+    """Split a 'command'-form entry into argv.
+
+    POSIX shlex treats backslashes as escapes, which destroys Windows
+    paths (``C:\\Users\\...``); split in non-POSIX mode there and strip
+    the quotes shlex then leaves on quoted tokens.
+    """
+    if os.name == "nt":
+        parts = shlex.split(command, posix=False)
+        return [
+            p[1:-1]
+            if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'"
+            else p
+            for p in parts
+        ]
+    return shlex.split(command)
 
 
 def flags_for(header: str, commands: List[CompileCommand]) -> ExtractedFlags:
