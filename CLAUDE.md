@@ -23,6 +23,8 @@ cppast2autopxd tests/headers/rectangle.hpp --namespace shapes  # smoke
 # C++ implementation
 cd cpp && ./bootstrap.sh            # clone cppast + build + run fixtures
 cd cpp && bash run_tests.sh         # all fixtures must be [cython OK]
+pip install ./cpp                   # scikit-build wheel: binary + the
+                                    # `cppast-autopxd` console script
 ```
 
 Slash commands: `/verify` (Python gate), `/verify-cpp` (C++ gate),

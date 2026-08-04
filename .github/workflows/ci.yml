@@ -71,6 +71,11 @@ jobs:
       - name: Gate on fixture results
         working-directory: cpp
         run: bash run_tests.sh
+      - name: scikit-build packaging (pip install ./cpp)
+        run: |
+          pip install -v ./cpp
+          cppast-autopxd --version
+          python -c "import cppast_autopxd_native as n; print(n.tool_path())"
 
   # Windows C++ build is experimental: cppast + MSVC/LLVM interplay is not
   # yet part of the supported matrix; failures here do not gate merges.

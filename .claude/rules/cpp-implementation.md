@@ -25,6 +25,11 @@ paths: "cpp/**"
 cd cpp && ./bootstrap.sh      # clones cppast into .deps/, builds, tests
 bash run_tests.sh             # committed fixtures are gating; all must be
                               # [cython OK]
+pip install ./cpp             # scikit-build + CMake packaging: builds the
+                              # binary (FetchContent clones cppast when
+                              # .deps/ is absent), ships it in the
+                              # cppast_autopxd_native package with the
+                              # `cppast-autopxd` console script
 ```
 
 - LLVM discovery: Homebrew keg on macOS, `llvm-config`/`llvm-config-N` on
