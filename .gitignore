@@ -17,6 +17,9 @@ venv/
 *.pyd
 *.dll
 *.dylib
+# ... but the C++ implementation's sources under cpp/ ARE tracked
+!cpp/**/*.c
+!cpp/**/*.cpp
 
 # Editors
 .idea/
