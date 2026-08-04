@@ -100,9 +100,18 @@ jobs:
         shell: bash
         working-directory: cpp
         run: |
+          # The LLVM Windows distribution ships no llvm-config.exe, so use
+          # cppast's explicit-variables path (all four must be set together).
+          CLANG_EXE="$(command -v clang)"
+          LLVM_PREFIX="$(dirname "$(dirname "$CLANG_EXE")")"
+          LLVM_VER="$(clang --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          echo "clang=$CLANG_EXE prefix=$LLVM_PREFIX version=$LLVM_VER"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DLLVM_CONFIG_BINARY="$(command -v llvm-config)"
+            -DLLVM_VERSION_EXPLICIT="$LLVM_VER" \
+            -DLIBCLANG_LIBRARY="$LLVM_PREFIX/lib/libclang.lib" \
+            -DLIBCLANG_INCLUDE_DIR="$LLVM_PREFIX/include" \
+            -DCLANG_BINARY="$CLANG_EXE"
           cmake --build build --target cppast_autopxd
       - name: Run fixtures
         shell: bash
