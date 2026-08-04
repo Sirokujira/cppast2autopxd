@@ -34,6 +34,22 @@ from edge_cases cimport (
     CPoint, c_distance, Blob, Holder, Machine, ANON_FIRST, Middle, Second,
 )
 from templates cimport Box, MyAlloc
+from callback_shim cimport CloudCallback, CloudCallbackFn
+
+
+cdef void _on_cloud(shared_ptr[PointCloud[PointXYZ]] cloud,
+                    void* user_data) noexcept nogil:
+    # The shape a real callback bridge uses: a plain C function the shim
+    # can store, invoked without the GIL held on the producer's thread.
+    pass
+
+
+def use_callback_shim():
+    cdef CloudCallback cb
+    cdef CloudCallbackFn fn = _on_cloud
+    cb.connect(fn, NULL)
+    cb.disconnect()
+    return cb.connected()
 
 
 def use_everything():
@@ -116,10 +132,19 @@ def _generate_all(outdir):
          "edge_cases.hpp", [], "edge_cases.pxd"),
         (os.path.join(HEADERS, "templates.hpp"),
          "templates.hpp", ["tpl"], "templates.pxd"),
+        # A shim in its own namespace naming pcl:: types, resolved through
+        # extra cimports -- the callback-bridge shape.
+        (os.path.join(MINI_PCL, "shim", "callback_shim.h"),
+         "shim/callback_shim.h", ["shim"], "callback_shim.pxd",
+         ["from point_cloud cimport PointCloud",
+          "from point_types cimport PointXYZ"]),
     ]
-    for header, extern_from, namespaces, out_name in jobs:
+    for job in jobs:
+        header, extern_from, namespaces, out_name = job[:4]
+        extra_cimports = job[4] if len(job) > 4 else None
         result = generate_pxd(
-            header, extern_from=extern_from, namespaces=namespaces
+            header, extern_from=extern_from, namespaces=namespaces,
+            include_dirs=[MINI_PCL], extra_cimports=extra_cimports,
         )
         with open(os.path.join(outdir, out_name), "w") as fh:
             fh.write(result.text)
