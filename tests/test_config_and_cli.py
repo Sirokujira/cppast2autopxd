@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 from cppast2autopxd import load_config, run_config
 from cppast2autopxd.cli import main
@@ -12,22 +13,25 @@ HEADERS = os.path.join(HERE, "headers")
 
 def _write_config(tmp_path):
     cfg = tmp_path / "pxdgen.toml"
-    headers_rel = os.path.relpath(HEADERS, str(tmp_path))
+    # Absolute, forward-slash paths: os.path.relpath cannot bridge Windows
+    # drives (repo on D:, pytest tmp on C:), and backslashes are escapes in
+    # TOML strings.
+    headers = Path(HEADERS).as_posix()
     cfg.write_text(
         textwrap.dedent(
             f"""
             [generator]
             std = "c++14"
-            include_dirs = ["{headers_rel}/mini_pcl"]
+            include_dirs = ["{headers}/mini_pcl"]
 
             [[headers]]
-            path = "{headers_rel}/mini_pcl/pcl/point_types.h"
+            path = "{headers}/mini_pcl/pcl/point_types.h"
             extern_from = "pcl/point_types.h"
             output = "out/point_types.pxd"
             namespaces = ["pcl"]
 
             [[headers]]
-            path = "{headers_rel}/mini_pcl/pcl/point_cloud.h"
+            path = "{headers}/mini_pcl/pcl/point_cloud.h"
             extern_from = "pcl/point_cloud.h"
             output = "out/point_cloud.pxd"
             namespaces = ["pcl"]
