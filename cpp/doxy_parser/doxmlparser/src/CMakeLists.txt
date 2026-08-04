@@ -1,0 +1,97 @@
+include_directories(
+    .
+    ../include
+    #${PROJECT_SOURCE_DIR}
+    ../include/qtools
+)
+if(WIN32)
+    add_library(doxmlparser STATIC
+        basehandler.cpp
+        compoundhandler.cpp
+        debug.cpp
+        dochandler.cpp
+        graphhandler.cpp
+        linkedtexthandler.cpp
+        loamhandler.cpp
+        mainhandler.cpp
+        memberhandler.cpp
+        paramhandler.cpp
+        sectionhandler.cpp
+        # qtool
+        qtools/qbuffer.cpp
+        qtools/qcollection.cpp
+        qtools/qcstring.cpp
+        qtools/qcstringlist.cpp
+        qtools/qdatastream.cpp
+        qtools/qdatetime.cpp
+        qtools/qdir.cpp
+        #qtools/qdir_unix.cpp
+        qtools/qdir_win32.cpp
+        qtools/qfile.cpp
+        #qtools/qfile_unix.cpp
+        qtools/qfile_win32.cpp
+        qtools/qfileinfo.cpp
+        #qtools/qfileinfo_unix.cpp
+        qtools/qfileinfo_win32.cpp
+        qtools/qgarray.cpp
+        qtools/qgcache.cpp
+        qtools/qgdict.cpp
+        qtools/qglist.cpp
+        qtools/qglobal.cpp
+        qtools/qgstring.cpp
+        qtools/qgvector.cpp
+        qtools/qiodevice.cpp
+        qtools/qmap.cpp
+        qtools/qregexp.cpp
+        qtools/qstring.cpp
+        qtools/qstringlist.cpp
+        qtools/qtextcodec.cpp
+        qtools/qtextstream.cpp
+        qtools/qutfcodec.cpp
+        qtools/qxml.cpp
+    )
+else()
+    add_library(doxmlparser STATIC
+        basehandler.cpp
+        compoundhandler.cpp
+        debug.cpp
+        dochandler.cpp
+        graphhandler.cpp
+        linkedtexthandler.cpp
+        loamhandler.cpp
+        mainhandler.cpp
+        memberhandler.cpp
+        paramhandler.cpp
+        sectionhandler.cpp
+        # qtool
+        qtools/qbuffer.cpp
+        qtools/qcollection.cpp
+        qtools/qcstring.cpp
+        qtools/qcstringlist.cpp
+        qtools/qdatastream.cpp
+        qtools/qdatetime.cpp
+        qtools/qdir.cpp
+        qtools/qdir_unix.cpp
+        qtools/qfile.cpp
+        qtools/qfile_unix.cpp
+        qtools/qfileinfo.cpp
+        qtools/qfileinfo_unix.cpp
+        qtools/qgarray.cpp
+        qtools/qgcache.cpp
+        qtools/qgdict.cpp
+        qtools/qglist.cpp
+        qtools/qglobal.cpp
+        qtools/qgstring.cpp
+        qtools/qgvector.cpp
+        qtools/qiodevice.cpp
+        qtools/qmap.cpp
+        qtools/qregexp.cpp
+        qtools/qstring.cpp
+        qtools/qstringlist.cpp
+        qtools/qtextcodec.cpp
+        qtools/qtextstream.cpp
+        qtools/qutfcodec.cpp
+        qtools/qxml.cpp
+    )
+endif()
+

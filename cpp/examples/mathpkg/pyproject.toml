@@ -1,0 +1,13 @@
+# PEP 517/518 build configuration. pip builds the wheel in an isolated
+# environment, so the build-time dependencies (setuptools, Cython) must be
+# declared here — otherwise setup.py's `from Cython.Build import cythonize`
+# fails with ModuleNotFoundError.
+[build-system]
+requires = ["setuptools>=61", "wheel", "Cython>=3.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mathpkg"
+version = "0.0.1"
+description = "Demo: C++ -> cppast_autopxd .pxd -> Cython -> Python package"
+requires-python = ">=3.9"

@@ -1,10 +1,19 @@
 # cppast2autopxd — Claude Code guide
 
-Python tool that generates Cython `.pxd` declaration files from C++ headers
-using libclang. Downstream consumer: `python-pcl_skbuild` (generates PCL
-wrapper pxd files with this tool).
+Generates Cython `.pxd` declaration files from C/C++ headers. TWO
+implementations live here, validated against shared expectations:
 
-## Layout
+- `src/cppast2autopxd/` — the **Python implementation** (libclang bindings;
+  zero native build steps, used by python-pcl_skbuild's pxdgen pipeline)
+- `cpp/` — the **C++ implementation** `cppast_autopxd` (built on the real
+  [cppast](https://github.com/foonathan/cppast) library; see
+  `cpp/FEASIBILITY.md` for its status ledger and `cpp/bootstrap.sh` to
+  build: clones cppast, builds, runs `cpp/run_tests.sh` whose fixtures —
+  incl. PCL point types — must all be `[cython OK]`)
+
+Downstream consumer: `python-pcl_skbuild` (generates PCL wrapper pxd files).
+
+## Layout (Python implementation)
 
 - `src/cppast2autopxd/parser.py` — libclang AST → IR (skips what pxd can't
   express, records warnings)

@@ -1,0 +1,32 @@
+# local build environment / dependencies (rebuilt by bootstrap.sh)
+.deps/
+
+# build output
+cppast_autopxd
+*.o
+*.a
+build/
+
+# generated pxd output + logs from test runs
+tests/output/
+
+# third-party headers fetched for testing (reproduce via tests/fetch_libs.sh)
+tests/input/draco/
+tests/input/pcl/
+
+# editor / OS
+.DS_Store
+
+# local Claude Code settings
+.claude/
+
+# Python build artifacts (examples/ packages + scaffolded output)
+__pycache__/
+*.pyc
+*.egg-info/
+*.so
+# Cython-generated C/C++ from .pyx (regenerated on build)
+examples/**/*.cpp
+!examples/**/src/*.cpp
+generated/
+/tmp/
