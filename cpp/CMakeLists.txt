@@ -53,6 +53,21 @@ else()
   add_subdirectory("${CPPAST_DIR}" "${CMAKE_BINARY_DIR}/cppast-build" EXCLUDE_FROM_ALL)
 endif()
 
+# cppast's bundled tiny-process-library pins a raw `-std=c++11` compile
+# option, which lands AFTER the standard flag CMake emits and therefore
+# wins. MSVC's STL requires C++14+, so building with clang++ on Windows
+# explodes inside <xutility>. Strip the pinned flag and express the
+# requirement as a compile feature instead (harmless elsewhere).
+if(TARGET tiny-process-library)
+  get_target_property(_tpl_opts tiny-process-library COMPILE_OPTIONS)
+  if(_tpl_opts)
+    list(REMOVE_ITEM _tpl_opts "-std=c++11")
+    set_target_properties(tiny-process-library PROPERTIES
+        COMPILE_OPTIONS "${_tpl_opts}")
+  endif()
+  target_compile_features(tiny-process-library PRIVATE cxx_std_14)
+endif()
+
 # --- optional Doxygen-XML doc-comment support (heavy, Qt-based; OFF) -----------
 option(USE_DOXYGEN "enable Doxygen XML doc-comment support (needs doxy_parser)" OFF)
 
