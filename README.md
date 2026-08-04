@@ -73,6 +73,40 @@ Batch mode from a TOML config:
 cppast2autopxd --config pxdgen/pcl_headers.toml
 ```
 
+### Driving everything from a CMake build (compile_commands.json)
+
+Configure the C++ project (e.g. PCL, or a small consumer of it) with
+`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, then point the generator at the
+build directory — include paths, defines, the language standard, and
+sysroot flags all come from the database, so nothing is hand-maintained:
+
+```sh
+cmake -S consumer -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cppast2autopxd /usr/include/pcl-1.14/pcl/PCLHeader.h \
+    --compile-db build --namespace pcl -o pclheader.pxd
+```
+
+(or `compile_db = "build"` under `[generator]` in the TOML config).
+Headers do not appear in compilation databases, so flags are taken from
+the best path-matching source entry. The C++ implementation accepts a
+database too: `cppast-autopxd <header> --database_dir build
+--database_file <a-TU-in-the-db> --fast_preprocessing ...`.
+
+### pyx scaffolds (starting-point wrappers)
+
+The pxd is a mechanical projection and fully generated; a good `.pyx`
+wrapper is a design artifact and is NOT fully automatable. The scaffolder
+generates the mechanical part — one owned-pointer `cdef class` per
+concrete C++ class, ctor/dtor plumbing, direct forwarding for
+primitive/string-typed methods, `TODO` comments for the rest — and never
+overwrites an existing file:
+
+```sh
+cppast2autopxd widget.hpp -o widget.pxd --pyx-scaffold widget_wrap.pyx
+```
+
+(or per-header `pyx_scaffold = "path.pyx"` in the TOML config.)
+
 All relative paths in the config resolve against the **config file's own
 directory** (here: `pxdgen/`):
 

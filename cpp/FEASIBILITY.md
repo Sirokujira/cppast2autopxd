@@ -202,6 +202,23 @@ All corrected and **verified by compiling the output with Cython**:
     a whole-file depth-counting pass converts every remaining template
     `<...>` to `[...]` (identifier-adjacent, `operator<`/`<<` untouched).
 
+### Compilation-database mode (real PCL, verified on Linux)
+
+`--database_dir <build> --database_file <a-TU-in-the-db>` feeds cppast the
+exact flags of a CMake build (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`).
+Verified against a real `find_package(PCL)` consumer: include dirs
+(`-I/usr/include/pcl-1.14`, eigen) and the standard arrive from the
+database and `pcl/PCLHeader.h` generates. Two caveats:
+
+- **`--fast_preprocessing` is required for Boost-macro-heavy headers** —
+  cppast's own preprocessing mangles `#include BOOST_PP_STRINGIZE(...)`
+  (trailing `/**/` survives into the computed path) and errors out.
+- Known emission gaps on real-PCL constructs (tracked for a future pass):
+  field default initializers leak (`uint32_t seq=0`), member typedefs
+  emit inside `cdef struct` bodies where Cython rejects them, and
+  `shared_ptr` referenced by member typedefs misses its cimport. The
+  Python implementation handles these headers cleanly today.
+
 ## `.pyd` (Windows)
 
 A `.pyd` is the *compiled* extension on Windows (the counterpart of the `.so`

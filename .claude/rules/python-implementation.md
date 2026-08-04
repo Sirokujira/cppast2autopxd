@@ -6,11 +6,17 @@ paths: "src/**,tests/**"
 ## Architecture (do not blur the layers)
 
 ```
+compiledb.py (compile_commands.json -> parse flags)
 parser.py (libclang AST -> IR)  ->  ir.py (dataclasses)  ->  emitter.py (pxd text)
               \-> typemap.py (C++ type spelling -> Cython type + cimports)
+pyx_scaffold.py (IR -> starting-point .pyx; never overwrites, always
+                 compiles — un-scaffoldable members become TODO comments)
 ```
 
 - typemap is TEXTUAL and backend-agnostic; never import clang there.
+- compiledb extraction keeps only parse-relevant flags (-I/-D/-std/
+  -isystem/-isysroot/-target); explicit user values take precedence,
+  database values append.
 - New construct = parser lowers to IR + emitter renders + BOTH a text-level
   test (test_generate.py) and an E2E cython test (test_cython_compile.py).
 

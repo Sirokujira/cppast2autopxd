@@ -49,6 +49,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="do not export simple integer #define constants",
     )
     p.add_argument(
+        "--compile-db", metavar="PATH",
+        help="CMake compile_commands.json (or the build directory holding "
+             "it); include dirs/defines/std/sysroot come from the best-"
+             "matching entry",
+    )
+    p.add_argument(
+        "--pyx-scaffold", metavar="PATH",
+        help="also write a starting-point .pyx wrapper (refuses to "
+             "overwrite an existing file)",
+    )
+    p.add_argument(
+        "--pxd-module", metavar="NAME",
+        help="cimport path of the generated pxd used inside the scaffold "
+             "(default: the output pxd basename)",
+    )
+    p.add_argument(
         "--extern-from", metavar="HEADER",
         help='header path used in `cdef extern from "..."` '
              "(default: input basename)",
@@ -107,6 +123,7 @@ def main(argv=None) -> int:
             exclude_names=args.exclude_names,
             nogil=not args.no_nogil,
             except_plus=False if args.no_except_plus else None,
+            compile_db=args.compile_db,
         )
     except ParseError as err:
         print(f"error: {err}", file=sys.stderr)
@@ -119,6 +136,32 @@ def main(argv=None) -> int:
             fh.write(result.text)
     else:
         sys.stdout.write(result.text)
+
+    if args.pyx_scaffold:
+        import os
+
+        if os.path.exists(args.pyx_scaffold):
+            print(
+                f"error: scaffold target exists, not overwriting: "
+                f"{args.pyx_scaffold}",
+                file=sys.stderr,
+            )
+            return 1
+        from .pyx_scaffold import render_scaffold
+
+        if args.pxd_module:
+            pxd_module = args.pxd_module
+        elif args.output:
+            pxd_module = os.path.splitext(os.path.basename(args.output))[0]
+        else:
+            pxd_module = os.path.splitext(os.path.basename(args.header))[0]
+        text = render_scaffold(
+            result.module,
+            pxd_module,
+            args.extern_from or os.path.basename(args.header),
+        )
+        with open(args.pyx_scaffold, "w", encoding="utf-8") as fh:
+            fh.write(text)
     return 0
 
 
