@@ -106,8 +106,11 @@ jobs:
           LLVM_PREFIX="$(dirname "$(dirname "$CLANG_EXE")")"
           LLVM_VER="$(clang --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
           echo "clang=$CLANG_EXE prefix=$LLVM_PREFIX version=$LLVM_VER"
+          # MSVC's STL requires C++14+; cppast's own minimum is C++11, so
+          # raise the whole build to C++17 on Windows.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
             -DLLVM_VERSION_EXPLICIT="$LLVM_VER" \
             -DLIBCLANG_LIBRARY="$LLVM_PREFIX/lib/libclang.lib" \
             -DLIBCLANG_INCLUDE_DIR="$LLVM_PREFIX/include" \
