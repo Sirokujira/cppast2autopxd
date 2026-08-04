@@ -107,15 +107,18 @@ jobs:
           LLVM_VER="$(clang --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
           echo "clang=$CLANG_EXE prefix=$LLVM_PREFIX version=$LLVM_VER"
           # MSVC's STL requires C++14+; cppast's own minimum is C++11, so
-          # raise the whole build to C++17 on Windows.
+          # raise the whole build to C++17 on Windows. CMAKE_CXX_FLAGS is
+          # appended to every TU after the feature-derived -std flag, so the
+          # 17 reliably wins regardless of per-target compile features.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DCMAKE_CXX_FLAGS="-std=c++17" \
             -DLLVM_VERSION_EXPLICIT="$LLVM_VER" \
             -DLIBCLANG_LIBRARY="$LLVM_PREFIX/lib/libclang.lib" \
             -DLIBCLANG_INCLUDE_DIR="$LLVM_PREFIX/include" \
             -DCLANG_BINARY="$CLANG_EXE"
-          cmake --build build --target cppast_autopxd
+          cmake --build build --target cppast_autopxd -- -v
       - name: Run fixtures
         shell: bash
         working-directory: cpp
