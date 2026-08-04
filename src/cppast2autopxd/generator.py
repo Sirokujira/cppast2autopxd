@@ -31,14 +31,34 @@ def generate_pxd(
     nogil: bool = True,
     except_plus: Optional[bool] = None,
     banner: Optional[str] = None,
+    compile_db: Optional[str] = None,
 ) -> "GenerationResult":
     """Generate pxd text for one header. Returns text plus warnings.
 
     ``except_plus`` defaults to True for C++ and False for C (`except +`
     requires C++ compilation).
+
+    ``compile_db`` points at a CMake ``compile_commands.json`` (or the
+    build directory containing it); include dirs, defines, the language
+    standard, and sysroot flags are then taken from the best-matching
+    database entry — explicitly passed values are kept and take
+    precedence, the database appends.
     """
     if except_plus is None:
         except_plus = language != "c"
+
+    if compile_db:
+        from .compiledb import flags_for, load_compile_db
+
+        db_flags = flags_for(header, load_compile_db(compile_db))
+        include_dirs = list(include_dirs or []) + db_flags.include_dirs
+        defines = list(defines or []) + db_flags.defines
+        extra_args = list(extra_args or []) + db_flags.extra_args
+        # The database standard applies unless the caller overrode the
+        # default explicitly.
+        if db_flags.std and std == "c++14":
+            std = db_flags.std
+
     mapper = TypeMapper(substitutions=dict(substitutions or {}))
     # Names brought in by user-supplied cimport lines are declarable.
     for line in extra_cimports or []:
@@ -73,13 +93,17 @@ def generate_pxd(
             banner=banner,
         ),
     )
-    return GenerationResult(text=text, warnings=list(module.warnings))
+    return GenerationResult(
+        text=text, warnings=list(module.warnings), module=module
+    )
 
 
 class GenerationResult:
-    def __init__(self, text: str, warnings: List[str]):
+    def __init__(self, text: str, warnings: List[str], module=None):
         self.text = text
         self.warnings = warnings
+        # The lowered IR (ir.Module) — consumed by the pyx scaffolder.
+        self.module = module
 
 
 def _imported_names(cimport_line: str) -> List[str]:
@@ -121,6 +145,35 @@ def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
             for w in result.warnings:
                 print(f"[cppast2autopxd]   warning: {w}")
         all_warnings.extend(result.warnings)
+
+        if job.pyx_scaffold:
+            if os.path.exists(job.pyx_scaffold):
+                if verbose:
+                    print(
+                        "[cppast2autopxd] scaffold exists, left untouched: "
+                        + os.path.relpath(job.pyx_scaffold, cfg.base_dir)
+                    )
+            else:
+                from .pyx_scaffold import render_scaffold
+
+                pxd_module = job.pxd_module or os.path.splitext(
+                    os.path.basename(job.output)
+                )[0]
+                text = render_scaffold(
+                    result.module,
+                    pxd_module,
+                    job.extern_from or os.path.basename(job.path),
+                )
+                os.makedirs(
+                    os.path.dirname(job.pyx_scaffold) or ".", exist_ok=True
+                )
+                with open(job.pyx_scaffold, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                if verbose:
+                    print(
+                        "[cppast2autopxd] scaffolded "
+                        + os.path.relpath(job.pyx_scaffold, cfg.base_dir)
+                    )
     return all_warnings
 
 
@@ -141,4 +194,5 @@ def generate_job(cfg: GeneratorConfig, job: HeaderJob) -> GenerationResult:
         extra_cimports=job.extra_cimports,
         nogil=cfg.nogil,
         except_plus=cfg.except_plus,
+        compile_db=cfg.compile_db,
     )

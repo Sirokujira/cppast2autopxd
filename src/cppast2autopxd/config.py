@@ -50,6 +50,12 @@ class HeaderJob:
     extra_cimports: List[str] = field(default_factory=list)
     # Per-header override of [generator].language ("c" or "c++").
     language: Optional[str] = None
+    # Optional pyx scaffold output (written only when the file does not
+    # exist yet — scaffolds are one-shot starting points).
+    pyx_scaffold: Optional[str] = None
+    # cimport path of the generated pxd used inside the scaffold; defaults
+    # to the output pxd's basename.
+    pxd_module: Optional[str] = None
 
 
 @dataclass
@@ -65,6 +71,9 @@ class GeneratorConfig:
     nogil: bool = True
     # None = auto (True for C++, False for C).
     except_plus: Optional[bool] = None
+    # CMake compile_commands.json (or the build dir containing it): include
+    # dirs / defines / std / sysroot are taken from the best-matching entry.
+    compile_db: Optional[str] = None
     substitutions: Dict[str, Substitution] = field(default_factory=dict)
     headers: List[HeaderJob] = field(default_factory=list)
     # Directory all relative paths resolve against.
@@ -78,6 +87,7 @@ def load_config(path: str) -> GeneratorConfig:
     base_dir = os.path.dirname(os.path.abspath(path))
     gen = data.get("generator", {})
     except_plus = gen.get("except_plus")
+    compile_db = gen.get("compile_db")
     cfg = GeneratorConfig(
         std=gen.get("std", "c++14"),
         language=gen.get("language", "c++"),
@@ -87,6 +97,7 @@ def load_config(path: str) -> GeneratorConfig:
         extra_args=list(gen.get("extra_args", [])),
         nogil=bool(gen.get("nogil", True)),
         except_plus=None if except_plus is None else bool(except_plus),
+        compile_db=None if compile_db is None else _resolve(base_dir, compile_db),
         base_dir=base_dir,
     )
 
@@ -110,6 +121,11 @@ def load_config(path: str) -> GeneratorConfig:
                 exclude_names=list(h.get("exclude", [])),
                 extra_cimports=list(h.get("extra_cimports", [])),
                 language=h.get("language"),
+                pyx_scaffold=(
+                    _resolve(base_dir, h["pyx_scaffold"])
+                    if h.get("pyx_scaffold") else None
+                ),
+                pxd_module=h.get("pxd_module"),
             )
         )
     return cfg
