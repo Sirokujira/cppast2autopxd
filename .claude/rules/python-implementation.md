@@ -35,6 +35,13 @@ pyx_scaffold.py (IR -> starting-point .pyx; never overwrites, always
 
 - Bare identifiers must resolve against `TypeMapper.known_names`/scopes;
   unknown names raise (parser warn-skips) — never pass through "on faith".
+- A QUALIFIED name whose prefix is not a local namespace still resolves
+  when its tail is already known (declared here or cimported). That is
+  the C++-shim case: a header in its own namespace whose signatures name
+  the wrapped library's types (`pclcompat::CloudCallback::connect
+  (pcl::PCDGrabber<pcl::PointXYZ>*)`). Cython has no qualification for
+  cimported names, so the cimport IS the statement of what the bare name
+  means. Unknown tails still raise.
 - The parser retries with the canonical spelling before giving up
   (`uindex_t` -> `unsigned int`).
 

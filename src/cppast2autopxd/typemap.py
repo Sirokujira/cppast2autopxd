@@ -344,6 +344,10 @@ class TypeMapper:
         - ``pcl::PointXYZ`` -> ``PointXYZ`` when "pcl" is a local namespace.
         - ``Outer::Inner`` -> ``Outer.Inner`` when ``Outer`` is a class
           declared in this pxd (Cython's nested-type syntax).
+        - ``pcl::PointXYZ`` -> ``PointXYZ`` when the header being wrapped
+          lives in a DIFFERENT namespace but the name was brought in with
+          an extra cimport (a C++ shim in its own namespace referring to
+          the library's types).
         """
         parts = [p for p in name.split("::") if p]
         if not parts:
@@ -358,6 +362,17 @@ class TypeMapper:
             raise UnsupportedTypeError(f"could not resolve type {name!r}")
         head = parts[0]
         if not self._is_known(head):
+            # A qualifier that is not a local namespace still resolves when
+            # the unqualified name is one this pxd knows -- the case of a
+            # shim declared in its own namespace whose signatures name the
+            # wrapped library's types (`pclcompat::CloudCallback::connect
+            # (pcl::PCDGrabber<pcl::PointXYZ>*)`). Cython has no namespace
+            # qualification for cimported names anyway: the cimport IS the
+            # statement of what the bare name means. Only the tail is
+            # accepted, and only when it is already known, so an unknown
+            # type still raises and the caller still skips with a warning.
+            if len(parts) > 1 and self._is_known(parts[-1]):
+                return parts[-1]
             raise UnsupportedTypeError(
                 f"{name!r} is not declared in this pxd: wrap its header, "
                 "add a [typemap.substitutions] entry, or bring it in via "

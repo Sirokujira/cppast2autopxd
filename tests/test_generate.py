@@ -229,3 +229,57 @@ def test_missing_header_raises():
 
     with pytest.raises(ParseError):
         generate_pxd(os.path.join(HEADERS, "no_such_file.hpp"))
+
+
+def _shim_result():
+    return generate_pxd(
+        os.path.join(MINI_PCL, "shim", "callback_shim.h"),
+        extern_from="shim/callback_shim.h",
+        include_dirs=[MINI_PCL],
+        namespaces=["shim"],
+        extra_cimports=[
+            "from pcl.pxd.point_cloud cimport PointCloud",
+            "from pcl.pxd.point_types cimport PointXYZ",
+        ],
+    )
+
+
+def test_shim_namespace_resolves_foreign_names_via_extra_cimports():
+    """A shim in its own namespace names the wrapped library's types with
+    their `pcl::` qualifier. Those resolve through the extra cimports, not
+    through the local namespace, so the whole class must survive."""
+    result = _shim_result()
+    text = result.text
+    assert 'namespace "shim" nogil:' in text
+    assert "void connect(CloudCallbackFn fn, void* user_data) except +" in text
+    assert "void feed(const PointXYZ& point) except +" in text
+    assert "bool connected() except +" in text
+    # Resolved to the bare cimported name -- no `pcl.` qualifier, which
+    # Cython has no syntax for on a cimported type.
+    assert "pcl::" not in text
+    assert "pcl.PointXYZ" not in text
+    assert not result.warnings, result.warnings
+
+
+def test_function_pointer_typedef_emitted():
+    """The callback signature itself is a function-pointer typedef; without
+    it the methods taking one get skipped."""
+    text = _shim_result().text
+    assert (
+        "ctypedef void (*CloudCallbackFn)"
+        "(shared_ptr[PointCloud[PointXYZ]] cloud, void* user_data)" in text
+    )
+    assert "from libcpp.memory cimport shared_ptr" in text
+
+
+def test_unknown_foreign_name_still_skips_with_warning():
+    """The relaxation is only for names the pxd actually knows: drop the
+    cimports and the same header must skip, loudly."""
+    result = generate_pxd(
+        os.path.join(MINI_PCL, "shim", "callback_shim.h"),
+        extern_from="shim/callback_shim.h",
+        include_dirs=[MINI_PCL],
+        namespaces=["shim"],
+    )
+    assert "void feed(" not in result.text
+    assert any("feed" in w for w in result.warnings), result.warnings
