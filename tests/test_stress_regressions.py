@@ -5,9 +5,12 @@ references undeclared names, and must warn whenever it drops something.
 """
 
 import os
+import platform
 import subprocess
 import sys
 import textwrap
+
+import pytest
 
 from cppast2autopxd import generate_pxd
 
@@ -236,6 +239,10 @@ def test_multidim_array_param_kept_verbatim(tmp_path):
     assert ok, err
 
 
+@pytest.mark.skipif(
+    platform.machine().lower() not in ("x86_64", "amd64", "i386", "i686", "x86"),
+    reason="xmmintrin/-msse2 are x86-only",
+)
 def test_compiler_builtin_vector_type_warns(tmp_path):
     (tmp_path / "simd.hpp").write_text(textwrap.dedent("""\
         #pragma once

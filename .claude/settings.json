@@ -8,7 +8,16 @@
       "Bash(cppast2autopxd:*)",
       "Bash(python -m cppast2autopxd:*)",
       "Bash(pip install -e:*)",
-      "Bash(clang -print-resource-dir)"
+      "Bash(clang -print-resource-dir)",
+      "Bash(cmake --build:*)",
+      "Bash(bash run_tests.sh:*)",
+      "Bash(bash bootstrap.sh:*)",
+      "Bash(./bootstrap.sh:*)",
+      "Bash(./cppast_autopxd:*)"
+    ],
+    "deny": [
+      "Edit(cpp/tests/output/**)",
+      "Edit(cpp/.deps/**)"
     ]
   }
 }

@@ -9,12 +9,24 @@ cmake_minimum_required(VERSION 3.16)
 project(autopxd VERSION 0.0.2 LANGUAGES CXX)
 
 # --- locate the cppast sources (cloned by bootstrap.sh into .deps/cppast) -----
+# When absent (e.g. a plain `pip install` via scikit-build), fall back to
+# fetching cppast with FetchContent so no manual bootstrap step is needed.
 set(CPPAST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/cppast"
     CACHE PATH "Path to a cppast source checkout")
+set(CPPAST_GIT_REPOSITORY "https://github.com/foonathan/cppast.git"
+    CACHE STRING "cppast repository used when CPPAST_DIR does not exist")
+set(CPPAST_GIT_TAG "main"
+    CACHE STRING "cppast git branch/tag/sha used when fetching")
+set(CPPAST_FETCH_AVAILABLE FALSE)
 if(NOT EXISTS "${CPPAST_DIR}/CMakeLists.txt")
-  message(FATAL_ERROR
-    "cppast not found at ${CPPAST_DIR}.\n"
-    "Run ./bootstrap.sh first (it clones cppast), or pass -DCPPAST_DIR=<path>.")
+  include(FetchContent)
+  message(STATUS "cppast not found at ${CPPAST_DIR}; fetching "
+                 "${CPPAST_GIT_REPOSITORY} @ ${CPPAST_GIT_TAG}")
+  FetchContent_Declare(cppast_src
+      GIT_REPOSITORY "${CPPAST_GIT_REPOSITORY}"
+      GIT_TAG "${CPPAST_GIT_TAG}"
+      GIT_SHALLOW TRUE)
+  set(CPPAST_FETCH_AVAILABLE TRUE)
 endif()
 
 # --- point cppast at the right libclang ---------------------------------------
@@ -35,7 +47,26 @@ set(build_tool OFF CACHE BOOL "" FORCE)
 
 # Bring in cppast as a subproject. Because it is not the top-level project, its
 # own tests/examples are skipped automatically; we only build the `cppast` lib.
-add_subdirectory("${CPPAST_DIR}" "${CMAKE_BINARY_DIR}/cppast-build" EXCLUDE_FROM_ALL)
+if(CPPAST_FETCH_AVAILABLE)
+  FetchContent_MakeAvailable(cppast_src)
+else()
+  add_subdirectory("${CPPAST_DIR}" "${CMAKE_BINARY_DIR}/cppast-build" EXCLUDE_FROM_ALL)
+endif()
+
+# cppast's bundled tiny-process-library pins a raw `-std=c++11` compile
+# option, which lands AFTER the standard flag CMake emits and therefore
+# wins. MSVC's STL requires C++14+, so building with clang++ on Windows
+# explodes inside <xutility>. Strip the pinned flag and express the
+# requirement as a compile feature instead (harmless elsewhere).
+if(TARGET tiny-process-library)
+  get_target_property(_tpl_opts tiny-process-library COMPILE_OPTIONS)
+  if(_tpl_opts)
+    list(REMOVE_ITEM _tpl_opts "-std=c++11")
+    set_target_properties(tiny-process-library PROPERTIES
+        COMPILE_OPTIONS "${_tpl_opts}")
+  endif()
+  target_compile_features(tiny-process-library PRIVATE cxx_std_14)
+endif()
 
 # --- optional Doxygen-XML doc-comment support (heavy, Qt-based; OFF) -----------
 option(USE_DOXYGEN "enable Doxygen XML doc-comment support (needs doxy_parser)" OFF)
@@ -58,7 +89,14 @@ if(USE_DOXYGEN)
   target_link_libraries(cppast_autopxd PRIVATE doxmlparser)
 endif()
 
-# Put the binary at the repo root so the docs/run_tests.sh `./cppast_autopxd`
-# invocations work regardless of the build directory. (gitignored.)
-set_target_properties(cppast_autopxd PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+if(SKBUILD)
+  # scikit-build install: the binary lands inside the wheel's
+  # cppast_autopxd_native package (setup.py sets cmake_install_dir).
+  install(TARGETS cppast_autopxd RUNTIME DESTINATION ".")
+else()
+  # Put the binary at the repo root so the docs/run_tests.sh
+  # `./cppast_autopxd` invocations work regardless of the build directory.
+  # (gitignored.)
+  set_target_properties(cppast_autopxd PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()

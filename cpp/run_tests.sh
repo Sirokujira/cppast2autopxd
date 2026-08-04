@@ -3,6 +3,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="$ROOT/cppast_autopxd"
+[[ -x "$TOOL" ]] || TOOL="$ROOT/cppast_autopxd.exe"   # Windows build output
 OUT="$ROOT/tests/output"
 STD="${STD:-c++14}"
 

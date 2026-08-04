@@ -30,3 +30,4 @@ examples/**/*.cpp
 !examples/**/src/*.cpp
 generated/
 /tmp/
+_skbuild/
