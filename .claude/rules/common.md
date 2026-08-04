@@ -23,8 +23,8 @@
 
 - Configuration, docs, and tests use RELATIVE paths only. Machine-specific
   locations (LLVM, PCL installs) are discovered at runtime or passed via
-  environment variables (`CPPAST2AUTOPXD_RESOURCE_DIR`, `LLVM_PREFIX`,
-  `PCL_ROOT`) — never hard-coded.
+  environment variables (`CPPAST2AUTOPXD_RESOURCE_DIR`,
+  `CPPAST2AUTOPXD_LIBCLANG`, `LLVM_PREFIX`, `PCL_ROOT`, `SDKROOT`) — never hard-coded.
 
 ## Workflow
 

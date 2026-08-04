@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field as dc_field
 from typing import List, Optional, Set
 
@@ -77,6 +78,76 @@ class ParseOptions:
 
 class ParseError(Exception):
     """Raised when libclang reports fatal diagnostics."""
+
+
+@functools.lru_cache(maxsize=1)
+def _configure_libclang() -> None:
+    """Point clang.cindex at a libclang that MATCHES the platform toolchain.
+
+    The pip ``libclang`` wheel lags the platform compilers; mixing it with a
+    newer toolchain's builtin headers breaks (Xcode 21 headers use macros
+    libclang 18 does not predefine; MSVC's STL static-asserts on the clang
+    version). On macOS/Windows the platform toolchain ships its own
+    libclang — use that so parser and headers always agree. Override with
+    ``CPPAST2AUTOPXD_LIBCLANG=<path to libclang shared library>``.
+    """
+    candidates = []
+    override = os.environ.get("CPPAST2AUTOPXD_LIBCLANG")
+    if override:
+        candidates.append(override)
+    elif sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["xcrun", "--find", "clang"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                toolchain_lib = os.path.normpath(os.path.join(
+                    os.path.dirname(out.stdout.strip()), "..", "lib",
+                    "libclang.dylib",
+                ))
+                candidates.append(toolchain_lib)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        candidates.append(
+            "/Library/Developer/CommandLineTools/usr/lib/libclang.dylib"
+        )
+    elif sys.platform == "win32":
+        clang_exe = shutil.which("clang")
+        if clang_exe:
+            candidates.append(
+                os.path.join(os.path.dirname(clang_exe), "libclang.dll")
+            )
+        candidates.append(r"C:\Program Files\LLVM\bin\libclang.dll")
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            try:
+                cindex.Config.set_library_file(cand)
+            except Exception:
+                pass
+            break
+
+
+@functools.lru_cache(maxsize=1)
+def _platform_args() -> tuple:
+    """Platform-required compile args: macOS needs the SDK sysroot or the
+    standard library headers are simply not found (SDKROOT overrides)."""
+    if sys.platform != "darwin":
+        return ()
+    sdk = os.environ.get("SDKROOT", "")
+    if not sdk:
+        try:
+            out = subprocess.run(
+                ["xcrun", "--show-sdk-path"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode == 0:
+                sdk = out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            sdk = ""
+    if sdk and os.path.isdir(sdk):
+        return ("-isysroot", sdk)
+    return ()
 
 
 @functools.lru_cache(maxsize=1)
@@ -129,8 +200,10 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
     if options.language == "c" and std.startswith("c++"):
         std = "c11"
 
+    _configure_libclang()
     index = cindex.Index.create()
     args = ["-x", options.language, f"-std={std}"]
+    args += list(_platform_args())
     args += list(_builtin_include_args())
     args += [f"-I{d}" for d in options.include_dirs]
     args += [f"-D{d}" for d in options.defines]
