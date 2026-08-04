@@ -5,9 +5,14 @@ TODO comments — and it must never overwrite an existing file."""
 import os
 import subprocess
 import sys
+import textwrap
 
-from cppast2autopxd import generate_pxd
+import pytest
+
+from cppast2autopxd import generate_pxd, run_config
 from cppast2autopxd.cli import main
+from cppast2autopxd.config import GeneratorConfig, HeaderJob
+from cppast2autopxd.generator import derive_pxd_module, scaffold_collides
 from cppast2autopxd.pyx_scaffold import render_scaffold
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +81,104 @@ def test_template_class_becomes_todo(tmp_path):
     assert "cdef class PointCloud:" not in scaffold
     (tmp_path / "pc_wrap.pyx").write_text(scaffold)
     _compile(tmp_path, "pc_wrap.pyx")
+
+
+def test_ctor_string_param_gets_encode_glue(tmp_path):
+    header = tmp_path / "named.h"
+    header.write_text(textwrap.dedent("""\
+        #pragma once
+        #include <string>
+        namespace demo {
+        class Named {
+        public:
+            Named(const std::string& name);
+            int id() const;
+        };
+        }
+    """))
+    result = generate_pxd(
+        str(header), extern_from="named.h", namespaces=["demo"]
+    )
+    (tmp_path / "named.pxd").write_text(result.text)
+    scaffold = render_scaffold(result.module, "named", "named.h")
+
+    assert "def __cinit__(self, str name):" in scaffold
+    # the constructor call needs the same encode glue as method calls
+    assert "new cpp.Named(<string> name.encode())" in scaffold
+
+    (tmp_path / "named_wrap.pyx").write_text(scaffold)
+    _compile(tmp_path, "named_wrap.pyx")
+
+
+def test_self_and_keyword_params_are_sanitized(tmp_path):
+    # 'self' and Python keywords are legal C++ parameter names; the
+    # scaffold must rename them or it will not compile.
+    header = tmp_path / "mover.h"
+    header.write_text(textwrap.dedent("""\
+        #pragma once
+        namespace demo {
+        class Mover {
+        public:
+            Mover(int self, int from);
+            int shift(int def, int global) const;
+        };
+        }
+    """))
+    result = generate_pxd(
+        str(header), extern_from="mover.h", namespaces=["demo"]
+    )
+    (tmp_path / "mover.pxd").write_text(result.text)
+    scaffold = render_scaffold(result.module, "mover", "mover.h")
+
+    assert "def __cinit__(self, int self_, int from_):" in scaffold
+    assert "new cpp.Mover(self_, from_)" in scaffold
+    assert "def shift(self, int def_, int global_):" in scaffold
+    assert "self.thisptr.shift(def_, global_)" in scaffold
+
+    (tmp_path / "mover_wrap.pyx").write_text(scaffold)
+    _compile(tmp_path, "mover_wrap.pyx")
+
+
+def test_derive_pxd_module_walks_package_dirs(tmp_path):
+    pkg = tmp_path / "src" / "pcl" / "pxd"
+    pkg.mkdir(parents=True)
+    (tmp_path / "src" / "pcl" / "__init__.py").write_text("")
+    (pkg / "__init__.pxd").write_text("")
+    out = pkg / "point_types.pxd"
+    assert derive_pxd_module(str(out)) == "pcl.pxd.point_types"
+    # outside any package: plain basename
+    assert derive_pxd_module(str(tmp_path / "plain.pxd")) == "plain"
+
+
+def test_scaffold_collision_is_refused(tmp_path):
+    assert scaffold_collides(
+        str(tmp_path / "rect.pyx"), str(tmp_path / "rect.pxd")
+    )
+    assert not scaffold_collides(
+        str(tmp_path / "rect_wrap.pyx"), str(tmp_path / "rect.pxd")
+    )
+
+    # CLI mode: refused up front, nothing written
+    rc = main([
+        os.path.join(HEADERS, "rectangle.hpp"),
+        "-o", str(tmp_path / "rect.pxd"),
+        "--namespace", "shapes",
+        "--pyx-scaffold", str(tmp_path / "rect.pyx"),
+    ])
+    assert rc == 2
+    assert not (tmp_path / "rect.pyx").exists()
+
+    # config mode: raises instead of writing a self-cimporting module
+    cfg = GeneratorConfig(base_dir=str(tmp_path))
+    cfg.headers.append(HeaderJob(
+        path=os.path.join(HEADERS, "rectangle.hpp"),
+        output=str(tmp_path / "r2.pxd"),
+        extern_from="rectangle.hpp",
+        namespaces=["shapes"],
+        pyx_scaffold=str(tmp_path / "r2.pyx"),
+    ))
+    with pytest.raises(ValueError):
+        run_config(cfg, verbose=False)
 
 
 def test_cli_scaffold_and_no_overwrite(tmp_path):

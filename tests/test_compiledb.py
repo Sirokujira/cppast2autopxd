@@ -87,6 +87,116 @@ def test_best_entry_by_path_proximity(tmp_path):
     assert flags.include_dirs == [str(tmp_path / "incB")]
 
 
+def test_dash_c_takes_no_value_and_dash_o_takes_one(tmp_path):
+    # -c directly before a real flag must not swallow it; -o consumes
+    # exactly its output path.
+    db = _write_db(tmp_path, [{
+        "directory": str(tmp_path),
+        "command": "cc -c -Iinc -o out.o -DX=1 x.c",
+        "file": "x.c",
+    }])
+    flags = flags_for(str(tmp_path / "x.c"), load_compile_db(db))
+    assert flags.include_dirs == [str(tmp_path / "inc")]
+    assert flags.defines == ["X=1"]
+
+
+def test_sysroot_separate_and_joined_forms(tmp_path):
+    db = _write_db(tmp_path, [
+        {
+            "directory": str(tmp_path),
+            "arguments": ["cc", "--sysroot", "sr", "-c", "a.c"],
+            "file": "a.c",
+        },
+        {
+            "directory": str(tmp_path),
+            "arguments": ["cc", "--sysroot=sr", "-c", "b.c"],
+            "file": "b.c",
+        },
+    ])
+    commands = load_compile_db(db)
+    sr = str(tmp_path / "sr")
+    flags_a = flags_for(str(tmp_path / "a.c"), commands)
+    assert flags_a.extra_args == ["--sysroot", sr]
+    flags_b = flags_for(str(tmp_path / "b.c"), commands)
+    assert flags_b.extra_args == ["--sysroot=" + sr]
+
+
+def test_response_file_expansion_and_missing_warning(tmp_path):
+    (tmp_path / "flags.rsp").write_text("-Iinc -DRSP=1")
+    db = _write_db(tmp_path, [
+        {
+            "directory": str(tmp_path),
+            "command": "cc @flags.rsp -c a.c",
+            "file": "a.c",
+        },
+        {
+            "directory": str(tmp_path),
+            "command": "cc @missing.rsp -c b.c",
+            "file": "b.c",
+        },
+    ])
+    commands = load_compile_db(db)
+    flags_a = flags_for(str(tmp_path / "a.c"), commands)
+    assert flags_a.include_dirs == [str(tmp_path / "inc")]
+    assert flags_a.defines == ["RSP=1"]
+    assert flags_a.warnings == []
+    flags_b = flags_for(str(tmp_path / "b.c"), commands)
+    assert any("missing.rsp" in w for w in flags_b.warnings)
+
+
+def test_db_std_applies_and_explicit_std_wins(tmp_path):
+    """std=None takes the database's -std=; an explicit std beats it."""
+    header = tmp_path / "cpp20.h"
+    header.write_text(textwrap.dedent("""\
+        #pragma once
+        namespace demo {
+        struct Modern {
+            int ok;
+            char8_t c8;   // char8_t exists only in C++20
+        };
+        }
+    """))
+    (tmp_path / "cpp20.cpp").write_text('#include "cpp20.h"\n')
+    db = _write_db(tmp_path, [{
+        "directory": str(tmp_path),
+        "command": "g++ -std=c++20 -c cpp20.cpp",
+        "file": "cpp20.cpp",
+    }])
+
+    result = generate_pxd(
+        str(header), extern_from="cpp20.h", namespaces=["demo"],
+        compile_db=db,
+    )
+    assert "Modern" in result.text
+
+    from cppast2autopxd.parser import ParseError
+
+    with pytest.raises(ParseError):
+        generate_pxd(
+            str(header), extern_from="cpp20.h", namespaces=["demo"],
+            std="c++14", compile_db=db,
+        )
+
+
+def test_db_warnings_surface_in_generation_result(tmp_path):
+    header = tmp_path / "plain.h"
+    header.write_text(
+        "#pragma once\nnamespace demo { struct P { int v; }; }\n"
+    )
+    (tmp_path / "plain.cpp").write_text('#include "plain.h"\n')
+    db = _write_db(tmp_path, [{
+        "directory": str(tmp_path),
+        "command": "g++ @gone.rsp -std=c++14 -c plain.cpp",
+        "file": "plain.cpp",
+    }])
+    result = generate_pxd(
+        str(header), extern_from="plain.h", namespaces=["demo"],
+        compile_db=db,
+    )
+    assert "cdef struct P:" in result.text
+    assert any("gone.rsp" in w for w in result.warnings)
+
+
 def test_generation_driven_entirely_by_db(tmp_path):
     """No explicit include_dirs: the include path comes from the db."""
     inc = tmp_path / "include"

@@ -60,7 +60,8 @@ class HeaderJob:
 
 @dataclass
 class GeneratorConfig:
-    std: str = "c++14"
+    # None = c++14, or the compile database's -std= when compile_db is set.
+    std: Optional[str] = None
     # "c++" or "c"; per-header override via the job's `language` key.
     language: str = "c++"
     # Export simple integer #define constants as an anonymous enum.
@@ -89,7 +90,7 @@ def load_config(path: str) -> GeneratorConfig:
     except_plus = gen.get("except_plus")
     compile_db = gen.get("compile_db")
     cfg = GeneratorConfig(
-        std=gen.get("std", "c++14"),
+        std=gen.get("std"),
         language=gen.get("language", "c++"),
         macros=bool(gen.get("macros", True)),
         include_dirs=[_resolve(base_dir, p) for p in gen.get("include_dirs", [])],

@@ -16,7 +16,12 @@ import sys
 
 from . import __version__
 from .config import load_config
-from .generator import generate_pxd, run_config
+from .generator import (
+    derive_pxd_module,
+    generate_pxd,
+    run_config,
+    scaffold_collides,
+)
 from .parser import ParseError
 
 
@@ -38,7 +43,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "-D", dest="defines", action="append", default=[],
         metavar="MACRO[=VAL]", help="define a preprocessor macro",
     )
-    p.add_argument("--std", default="c++14", help="C++ standard (default: c++14)")
+    p.add_argument(
+        "--std", default=None,
+        help="C++ standard (default: c++14, or the -std= of the matched "
+             "entry when --compile-db is given; explicit values win)",
+    )
     p.add_argument(
         "--language", choices=["c++", "c"], default="c++",
         help="input language; 'c' parses plain C headers "
@@ -110,6 +119,17 @@ def main(argv=None) -> int:
             run_config(load_config(args.config))
             return 0
 
+        if args.pyx_scaffold and args.output and scaffold_collides(
+            args.pyx_scaffold, args.output
+        ):
+            print(
+                f"error: --pyx-scaffold {args.pyx_scaffold} and -o "
+                f"{args.output} would form the same Cython module; "
+                "name the scaffold differently (e.g. _wrap.pyx)",
+                file=sys.stderr,
+            )
+            return 2
+
         result = generate_pxd(
             args.header,
             extern_from=args.extern_from,
@@ -125,7 +145,7 @@ def main(argv=None) -> int:
             except_plus=False if args.no_except_plus else None,
             compile_db=args.compile_db,
         )
-    except ParseError as err:
+    except (ParseError, ValueError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
@@ -152,7 +172,7 @@ def main(argv=None) -> int:
         if args.pxd_module:
             pxd_module = args.pxd_module
         elif args.output:
-            pxd_module = os.path.splitext(os.path.basename(args.output))[0]
+            pxd_module = derive_pxd_module(args.output)
         else:
             pxd_module = os.path.splitext(os.path.basename(args.header))[0]
         text = render_scaffold(
