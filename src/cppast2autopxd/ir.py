@@ -15,7 +15,12 @@ from typing import List, Optional
 
 @dataclass
 class Param:
-    """A function/method parameter."""
+    """A function/method parameter.
+
+    ``type`` may be the literal ``"..."`` for C varargs.  When ``raw`` is
+    set it is the complete declarator text (used for function-pointer
+    parameters like ``int (*cb)(int)``) and overrides type/name/dims.
+    """
 
     type: str
     name: str = ""
@@ -23,16 +28,22 @@ class Param:
     # Multi-dimensional array parameters keep their dims verbatim
     # (``float m[4][4]``); "" renders an incomplete first dim (``m[][4]``).
     array_dims: List[str] = field(default_factory=list)
+    raw: Optional[str] = None
 
 
 @dataclass
 class Field:
-    """A public data member."""
+    """A public data member.
+
+    When ``raw`` is set it is the complete declarator text (used for
+    function-pointer fields like ``int (*on_event)(int)``).
+    """
 
     type: str
     name: str
     # For constant-size arrays: ["4"] renders as ``float data[4]``.
     array_dims: List[str] = field(default_factory=list)
+    raw: Optional[str] = None
 
 
 @dataclass
@@ -54,10 +65,15 @@ class Constructor:
 
 @dataclass
 class MemberTypedef:
-    """A typedef/using alias declared inside a class body."""
+    """A typedef/using alias declared inside a class body.
+
+    When ``raw`` is set it is the complete declarator text after
+    ``ctypedef`` (function-pointer typedefs embed the name).
+    """
 
     name: str
     underlying: str
+    raw: Optional[str] = None
 
 
 @dataclass
@@ -78,6 +94,9 @@ class Enum:
 class Typedef:
     name: str
     underlying: str
+    # Complete declarator text after ``ctypedef`` (function-pointer
+    # typedefs embed the name); overrides name/underlying when set.
+    raw: Optional[str] = None
 
 
 @dataclass
@@ -85,6 +104,8 @@ class Function:
     name: str
     return_type: str
     params: List[Param] = field(default_factory=list)
+    # Function templates: parameter names, e.g. ["T"] for `T clamp[T](...)`.
+    template_params: List[str] = field(default_factory=list)
 
 
 @dataclass

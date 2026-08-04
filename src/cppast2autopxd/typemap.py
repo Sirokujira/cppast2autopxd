@@ -49,6 +49,23 @@ _STD_TEMPLATES: Dict[str, Tuple[str, str, int]] = {
     "std::shared_ptr": ("shared_ptr", "from libcpp.memory cimport shared_ptr", 1),
     "std::unique_ptr": ("unique_ptr", "from libcpp.memory cimport unique_ptr", 1),
     "std::weak_ptr": ("weak_ptr", "from libcpp.memory cimport weak_ptr", 1),
+    "std::function": ("function", "from libcpp.functional cimport function", 1),
+    "std::optional": ("optional", "from libcpp.optional cimport optional", 1),
+    "std::atomic": ("atomic", "from libcpp.atomic cimport atomic", 1),
+    "std::complex": ("complex", "from libcpp.complex cimport complex", 1),
+    "std::forward_list": (
+        "forward_list",
+        "from libcpp.forward_list cimport forward_list",
+        1,
+    ),
+    "std::queue": ("queue", "from libcpp.queue cimport queue", 1),
+    "std::priority_queue": (
+        "priority_queue",
+        "from libcpp.queue cimport priority_queue",
+        1,
+    ),
+    "std::stack": ("stack", "from libcpp.stack cimport stack", 1),
+    "std::span": ("span", "from libcpp.span cimport span", 1),
     # PCL >= 1.11 aliases pcl::shared_ptr to std::shared_ptr.
     "pcl::shared_ptr": ("shared_ptr", "from libcpp.memory cimport shared_ptr", 1),
     # boost::shared_ptr is ABI-compatible enough for declaration purposes on
@@ -68,7 +85,20 @@ _STD_SIMPLE: Dict[str, Tuple[str, Optional[str]]] = {
     "std::ptrdiff_t": ("ptrdiff_t", None),
     "ptrdiff_t": ("ptrdiff_t", None),
     "bool": ("bool", "from libcpp cimport bool"),
+    "_Bool": ("bint", None),
     "wchar_t": ("wchar_t", "from libc.stddef cimport wchar_t"),
+    "std::string_view": (
+        "string_view",
+        "from libcpp.string_view cimport string_view",
+    ),
+    "std::any": ("any", "from libcpp.any cimport any"),
+    # Curated libc/posix symbols commonly seen in C APIs.
+    "time_t": ("time_t", "from libc.time cimport time_t"),
+    "std::time_t": ("time_t", "from libc.time cimport time_t"),
+    "clock_t": ("clock_t", "from libc.time cimport clock_t"),
+    "std::clock_t": ("clock_t", "from libc.time cimport clock_t"),
+    "FILE": ("FILE", "from libc.stdio cimport FILE"),
+    "ssize_t": ("ssize_t", "from posix.types cimport ssize_t"),
 }
 
 #: stdint types -> libc.stdint cimport (all families libc/stdint.pxd covers).
@@ -163,8 +193,20 @@ class TypeMapper:
             raise UnsupportedTypeError("empty type spelling")
         if "&&" in s:
             raise UnsupportedTypeError(f"rvalue reference not supported: {s!r}")
+        if "anonymous" in s or "unnamed" in s:
+            raise UnsupportedTypeError(f"anonymous type not supported: {s!r}")
+        if "(*" in s or "(&" in s:
+            raise UnsupportedTypeError(
+                f"function-pointer type not supported here: {s!r}"
+            )
         if "(" in s:
-            raise UnsupportedTypeError(f"function/array type not supported: {s!r}")
+            lt = s.find("<")
+            if lt == -1 or s.find("(") < lt:
+                # A bare function type: valid only as a template argument
+                # (std::function<int(int)> -> function[int(int)]).
+                return self._translate_function_type(s)
+            # otherwise the parens live inside template args; the recursive
+            # argument translation handles them.
 
         # Split trailing pointer/reference declarators off the base type.
         base, suffix = _split_declarators(s)
@@ -260,6 +302,23 @@ class TypeMapper:
                 return cy + self._render_args(args, keep=keep)
         return None
 
+    def _translate_function_type(self, s: str) -> str:
+        """Translate a bare function type (``int (Foo&, double)``), which is
+        only expressible inside template argument lists."""
+        m = re.fullmatch(r"([^()]+?)\s*\((.*)\)", s)
+        if m is None:
+            raise UnsupportedTypeError(
+                f"function/array type not supported: {s!r}"
+            )
+        ret = self._translate(m.group(1))
+        inner = m.group(2).strip()
+        if not inner or inner == "void":
+            return f"{ret}()"
+        args = ", ".join(
+            self._translate(a) for a in _split_top_level(inner)
+        )
+        return f"{ret}({args})"
+
     def _render_args(self, args: List[str], keep: int) -> str:
         kept = args[:keep] if keep else args
         for a in kept:
@@ -347,6 +406,26 @@ def _strip_elaboration(s: str) -> str:
     return s
 
 
+def _split_top_level(s: str) -> List[str]:
+    """Split on commas that sit outside any ``<>`` or ``()`` nesting."""
+    parts: List[str] = []
+    depth = 0
+    current: List[str] = []
+    for ch in s:
+        if ch in "<(":
+            depth += 1
+        elif ch in ">)":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
 def _split_template(s: str) -> Tuple[str, Optional[List[str]]]:
     """Split ``std::map<K, V>`` into (``std::map``, [``K``, ``V``])."""
     lt = s.find("<")
@@ -356,19 +435,4 @@ def _split_template(s: str) -> Tuple[str, Optional[List[str]]]:
         raise UnsupportedTypeError(f"unbalanced template brackets: {s!r}")
     name = s[:lt]
     inner = s[lt + 1 : -1]
-    args: List[str] = []
-    depth = 0
-    current = []
-    for ch in inner:
-        if ch == "<":
-            depth += 1
-        elif ch == ">":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            args.append("".join(current).strip())
-            current = []
-            continue
-        current.append(ch)
-    if current:
-        args.append("".join(current).strip())
-    return name, args
+    return name, _split_top_level(inner)

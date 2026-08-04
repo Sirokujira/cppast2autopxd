@@ -40,6 +40,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--std", default="c++14", help="C++ standard (default: c++14)")
     p.add_argument(
+        "--language", choices=["c++", "c"], default="c++",
+        help="input language; 'c' parses plain C headers "
+             "(no except+, no distutils c++ line)",
+    )
+    p.add_argument(
+        "--no-macros", action="store_true",
+        help="do not export simple integer #define constants",
+    )
+    p.add_argument(
         "--extern-from", metavar="HEADER",
         help='header path used in `cdef extern from "..."` '
              "(default: input basename)",
@@ -91,11 +100,13 @@ def main(argv=None) -> int:
             include_dirs=args.include_dirs,
             defines=args.defines,
             std=args.std,
+            language=args.language,
+            macros=not args.no_macros,
             namespaces=args.namespaces,
             include_names=args.include_names,
             exclude_names=args.exclude_names,
             nogil=not args.no_nogil,
-            except_plus=not args.no_except_plus,
+            except_plus=False if args.no_except_plus else None,
         )
     except ParseError as err:
         print(f"error: {err}", file=sys.stderr)

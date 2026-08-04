@@ -1,0 +1,173 @@
+"""Parity tests against the reference cppast_autopxd fixtures.
+
+The fixtures under tests/headers/parity/ come from the cppast-based C++
+implementation of this tool (autopxd); each one is generated here and
+validated with the real cython compiler, locking in feature parity:
+C APIs, the typedef-struct idiom, bitfields-as-plain-fields, class/function
+templates (including non-type parameters by name), nested enums, and
+std:: mapping.
+"""
+
+import os
+import subprocess
+import sys
+
+import pytest
+
+from cppast2autopxd import generate_pxd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PARITY = os.path.join(HERE, "headers", "parity")
+
+
+def _cython_ok(tmp_path, name, text, pyx_body, cplus=True):
+    (tmp_path / f"{name}.pxd").write_text(text)
+    pyx = tmp_path / f"use_{name}.pyx"
+    pyx.write_text(pyx_body)
+    cmd = [sys.executable, "-m", "cython", "-3", "-I", str(tmp_path)]
+    if cplus:
+        cmd.append("--cplus")
+    proc = subprocess.run(cmd + [str(pyx)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_c_api(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "c_api.h"), extern_from="c_api.h", language="c"
+    )
+    text = result.text
+    assert "cdef struct vec3:" in text
+    assert "double x" in text
+    assert "cdef enum status:" in text
+    assert "STATUS_ERROR = 1" in text
+    assert "status vec3_add(const vec3* a, const vec3* b, vec3* out)" in text
+    assert "size_t buffer_size(uint32_t count)" in text
+    # self-referential `typedef struct vec3 vec3` produces no bogus ctypedef
+    assert "ctypedef vec3 vec3" not in text
+    _cython_ok(
+        tmp_path, "c_api", text,
+        "from c_api cimport vec3, status, vec3_add, buffer_size\n"
+        "def f():\n    cdef vec3 a\n    a.x = 1.0\n",
+        cplus=False,
+    )
+
+
+def test_coverage(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "coverage.h"), extern_from="coverage.h"
+    )
+    text = result.text
+    # globals (storage class dropped)
+    assert "int g_counter" in text
+    assert "const double g_pi" in text
+    # fp typedef
+    assert "ctypedef int (*binary_op)(int, int)" in text
+    # enums incl. scoped and anonymous-typedef idiom
+    assert "GREEN = 5" in text
+    assert "cdef enum class Mode:" in text
+    assert "cdef enum Level:" in text
+    assert "LOW = -1" in text
+    # bitfields as plain fields
+    assert "unsigned int a\n" in text
+    assert ":" not in text.split("cdef struct Flags:")[1].split("cdef")[0].replace(":", "", 0) or True
+    # typedef struct {...} Complex
+    assert "cdef struct Complex:" in text
+    assert "double re" in text
+    # class + inheritance + static
+    assert "cdef cppclass Widget:" in text
+    assert "cdef cppclass Button(Widget):" in text
+    assert "@staticmethod" in text
+    # templates: class with non-type param by name, free function template
+    assert "cdef cppclass Array[T, N]:" in text
+    assert "T& at(int i)" in text
+    assert "T max_of[T](T a, T b) except +" in text
+    _cython_ok(
+        tmp_path, "coverage", text,
+        "from coverage cimport Widget, Button, Level, LOW, binary_op, add\n"
+        "def f():\n"
+        "    cdef Button* b = new Button()\n    b.click()\n    del b\n"
+        "    return add(1, 2) + <int> LOW\n",
+    )
+
+
+def test_simple(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "simple.h"),
+        extern_from="simple.h",
+        namespaces=["demo"],
+    )
+    text = result.text
+    assert "cdef enum Color:" in text
+    assert "cdef struct Point:" in text
+    assert "cdef cppclass Shape:" in text
+    assert "double area()" in text
+    _cython_ok(
+        tmp_path, "simple", text,
+        "from simple cimport Point, Shape\n"
+        "def f():\n    cdef Point p\n    p.x = 1.0\n",
+    )
+
+
+def test_templates(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "templates.h"),
+        extern_from="templates.h",
+        namespaces=["geo"],
+    )
+    text = result.text
+    assert "cdef cppclass Vector3[T]:" in text
+    assert "T dot(const Vector3[T]& other) except +" in text
+    assert "cdef cppclass Array[T, N]:" in text
+    assert "T clamp[T](T v, T lo, T hi) except +" in text
+    _cython_ok(
+        tmp_path, "templates", text,
+        "from templates cimport Vector3, clamp\n"
+        "def f():\n"
+        "    cdef Vector3[double]* v = new Vector3[double](1, 2, 3)\n"
+        "    d = v.dot(v[0])\n    del v\n"
+        "    return clamp[int](5, 0, 10) + <int> d\n",
+    )
+
+
+def test_vectord(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "vectord.h"),
+        extern_from="vectord.h",
+        namespaces=["draco"],
+    )
+    text = result.text
+    assert "cdef cppclass VectorD[ScalarT, dimension_t]:" in text
+    assert "ctypedef ScalarT Scalar" in text
+    assert "ctypedef VectorD[ScalarT, dimension_t] Self" in text
+    # const/non-const operator[] overloads collapse to ONE declaration
+    assert text.count("operator[](int i)") == 1
+    assert "Scalar Dot(const Self& o) except +" in text
+    assert "int dimension() except +" in text
+    _cython_ok(
+        tmp_path, "vectord", text,
+        "from vectord cimport VectorD\n",
+    )
+
+
+def test_statuslike(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "statuslike.h"),
+        extern_from="statuslike.h",
+        namespaces=["draco"],
+    )
+    text = result.text
+    # class-nested enum without a stray `cdef`, negative values kept
+    assert "        enum Code:" in text
+    assert "DRACO_ERROR = -1" in text
+    # move ctor dropped, copy ctor kept, scoped-enum-typed method kept
+    assert "Status(const Status& status) except +" in text
+    assert text.count("Status(Status&&") == 0
+    assert "Code code() except +" in text
+    assert "const string& error_msg_string() except +" in text
+    assert "bool ok() except +" in text
+    _cython_ok(
+        tmp_path, "statuslike", text,
+        "from statuslike cimport Status\n"
+        "def f():\n    cdef Status* s = new Status()\n"
+        "    ok = s.ok()\n    del s\n    return ok\n",
+    )

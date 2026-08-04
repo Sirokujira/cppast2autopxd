@@ -137,9 +137,9 @@ def test_member_function_template_warns(tmp_path):
     assert any("member function template" in w for w in result.warnings)
 
 
-def test_method_using_skipped_member_typedef_is_skipped(tmp_path):
-    """When a member typedef cannot be declared, methods referencing it must
-    be dropped WITH a warning instead of referencing an undeclared name."""
+def test_function_pointer_member_typedef_supported(tmp_path):
+    """Function-pointer member typedefs are declarable in Cython and must be
+    emitted (with methods referencing them intact)."""
     (tmp_path / "cb.hpp").write_text(textwrap.dedent("""\
         #pragma once
         namespace demo {
@@ -156,11 +156,15 @@ def test_method_using_skipped_member_typedef_is_skipped(tmp_path):
         str(tmp_path / "cb.hpp"), extern_from="cb.hpp", namespaces=["demo"]
     )
     text = result.text
-    assert "Callback" not in text
-    assert "setCallback" not in text
+    assert "ctypedef void (*Callback)(int)" in text
+    assert "void setCallback(Callback cb) except +" in text
     assert "int run() except +" in text
-    assert any("Callback" in w for w in result.warnings)
-    assert any("setCallback" in w for w in result.warnings)
+    ok, err = _cython_ok(
+        tmp_path, "cb", text,
+        "from cb cimport Runner\ndef f():\n"
+        "    cdef Runner* r = new Runner()\n    r.run()\n    del r\n",
+    )
+    assert ok, err
 
 
 def test_forward_declared_class_emitted_opaque(tmp_path):
