@@ -198,3 +198,29 @@ def test_pcl_header(tmp_path):
         "from pcl_header cimport PCLHeader, HeaderPtr\n"
         "def f():\n    cdef HeaderPtr h\n    return h.use_count()\n",
     )
+
+
+def test_smart_returns(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "smart_returns.h"),
+        extern_from="smart_returns.h",
+        namespaces=["demo"],
+    )
+    text = result.text
+    # by-value smart-pointer returns keep their template argument (the C++
+    # reference implementation once emitted `shared_ptr[] build()`)
+    assert "shared_ptr[Res] build()" in text
+    assert "shared_ptr[const Res] view()" in text
+    assert "shared_ptr[]" not in text
+    # constructor and method parameters too
+    assert "Factory(shared_ptr[Res] seed)" in text
+    assert "void absorb(shared_ptr[Res] extra)" in text
+    # class template parameter as the argument
+    assert "shared_ptr[T] acquire()" in text
+    # operator< survives (not swallowed as a template opener)
+    assert "operator<(const Factory& other)" in text
+    _cython_ok(
+        tmp_path, "smart_returns", text,
+        "from smart_returns cimport Factory\n"
+        "def f():\n    cdef Factory fac\n    return fac.build().use_count()\n",
+    )
