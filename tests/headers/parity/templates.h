@@ -33,4 +33,12 @@ class Array {
 template <typename T>
 T clamp(T v, T lo, T hi);
 
+
+// A template STRUCT is C++-only; Cython rejects template parameters on
+// `cdef struct`, so it must emit as `cdef cppclass` like the classes above.
+template <typename T>
+struct Box {
+  T v;
+};
+
 }  // namespace geo

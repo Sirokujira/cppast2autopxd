@@ -33,7 +33,7 @@ draco). This records what works today, the environment, and the gaps.
 
 ## Verified results (`./run_tests.sh`)
 
-All nine committed fixtures generate AND pass Cython validation (a `cython`
+All ten committed fixtures generate AND pass Cython validation (a `cython`
 binary on `PATH`, or `CYTHON=/path`, enables the `[cython OK]` check):
 
 ```
@@ -43,6 +43,7 @@ OK    pcl_header                     469 bytes  (16 AST visits)  [cython OK]
 OK    pcl_point_cloud                939 bytes  (32 AST visits)  [cython OK]
 OK    pcl_point_types               1192 bytes  (115 AST visits)  [cython OK]
 OK    simple                         824 bytes  (33 AST visits)  [cython OK]
+OK    smart_returns                  576 bytes  (25 AST visits)  [cython OK]
 OK    statuslike                     621 bytes  (25 AST visits)  [cython OK]
 OK    templates                      667 bytes  (29 AST visits)  [cython OK]
 OK    vectord                        821 bytes  (23 AST visits)  [cython OK]
@@ -233,6 +234,30 @@ All corrected and **verified by compiling the output with Cython**:
     signature whose `=` is a default argument (left untouched), a paren
     after the `=` is just initializer expression and truncates. Found by
     the pxd-reviewer probing #35's escape hatch; covered in coverage.h.
+39. ~~method and constructor signatures lost concrete template arguments
+    (`std::shared_ptr<Res> build();` → `shared_ptr[] build()`, cython
+    FAIL; free functions were unaffected)~~ → the member-function and
+    constructor token loops rebuilt `<...>` keeping ONLY the class's own
+    template parameter names; the filter is deleted and template text
+    flows through verbatim for the #33 whole-file angle→square pass to
+    convert (nested args and `operator<` already handled there). The
+    east-const backscan learned the `<...>` spelling too — cppast
+    tokenizes `const Vector3<T>&` east-const, and at conversion time #33
+    has not run yet, so both bracket alphabets must balance. PCL hits
+    the method shape constantly (`makeShared()`, `getInputCloud()`);
+    fixture: smart_returns.h.
+40. ~~#38's `=`-before-`(` rule truncated operator NAMES: inside a record
+    body, `bool operator>=(...)` hit the `=` of `>=` before any `(` and
+    emitted a silently-broken `bool operator>` (same for `<=`, `==`, and
+    copy assignment `operator=`)~~ → only a LONE `=` counts as an
+    initializer: compound-token neighbours (`<>!+-*/%&|^=` before, `=`
+    after) and a preceding `operator` word mark a signature. Found by the
+    pxd-reviewer probing #39; operator family added to smart_returns.h.
+41. ~~a template struct emitted `cdef struct Box[T]:` — Cython rejects
+    template parameters on `cdef struct`~~ → the #34 promotion pass also
+    promotes any struct header carrying template brackets (a template
+    struct is C++-only, so `cdef cppclass` is always right); covered in
+    templates.h, matching the Python implementation.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -267,13 +292,6 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    that header passes.)
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
-3. **Smart-pointer by-value RETURN types lose their template argument**
-   (`std::shared_ptr<Res> make();` → `shared_ptr[] make()`, cython FAIL).
-   Fields and parameters emit correctly (`shared_ptr[Res] sp_field`); the
-   gap is in return-type emission and predates the #34-#38 passes
-   (reproduced byte-identically with the parent-commit binary). No
-   committed fixture exercises the shape yet — take it with its own
-   fixture in a future pass.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
    (they `#include` siblings); the committed `templates.h` / `vectord.h` /
    `statuslike.h` fixtures exercise the same constructs self-containedly.

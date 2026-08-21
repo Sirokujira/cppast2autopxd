@@ -912,6 +912,13 @@ public:
                 if(body_t.rfind(structKw, 0) != 0 || body_t.empty() || body_t.back() != ':')
                     continue;
 
+                // A TEMPLATE struct header (`cdef struct Box[T]:` — the #33
+                // angle->square pass has already run) is C++-only too, and
+                // Cython rejects template parameters on `cdef struct`; promote
+                // it regardless of what the body holds.
+                bool isTemplateHeader =
+                    body_t.find('[') != std::string::npos;
+
                 bool hasMemberTypedef = false;
                 for(size_t j = i + 1; j < lines.size(); ++j)
                 {
@@ -922,7 +929,7 @@ public:
                     std::string t = lines[j].substr(indentOf(lines[j]));
                     if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
                 }
-                if(hasMemberTypedef)
+                if(hasMemberTypedef || isTemplateHeader)
                     lines[i] = std::string(p, ' ') + "cdef cppclass " +
                                body_t.substr(structKw.size());
             }
@@ -991,6 +998,19 @@ public:
                     else if(t[k] == '(') break;
                     else if(t[k] == '=' && depth == 0)
                     {
+                        // Only a LONE `=` is an initializer. The `=` inside an
+                        // operator NAME reaches this scan before any `(`
+                        // (`bool operator>=(...)`), and truncating there once
+                        // emitted a silently-broken `bool operator>`. Compound
+                        // tokens (`==`, `<=`, `>=`, `!=`, second char of `==`)
+                        // and a preceding `operator` word (copy assignment,
+                        // `Cmp& operator=(...)`) mark a signature: leave the
+                        // whole line alone.
+                        if(k + 1 < t.size() && t[k + 1] == '=') break;
+                        if(k > 0 && std::string("<>!+-*/%&|^=").find(t[k - 1]) != std::string::npos) break;
+                        static const std::string opWord = "operator";
+                        if(k >= opWord.size() &&
+                           t.compare(k - opWord.size(), opWord.size(), opWord) == 0) break;
                         t = t.substr(0, k);
                         while(!t.empty() && (t.back() == ' ' || t.back() == '\t'))
                             t.pop_back();
@@ -1471,14 +1491,17 @@ private:
                 continue;
             }
             // find the start of the type token preceding " const"
-            // (letters, digits, _, ::, and []-balanced template args, spaces)
+            // (letters, digits, _, ::, and bracket-balanced template args,
+            // spaces). Template args can still be in their C++ `<...>`
+            // spelling at this point — the #33 angle->square pass runs later
+            // — so both bracket alphabets balance here.
             std::string::size_type start = pos;
             int bracket = 0;
             while(start > 0)
             {
                 char c = s[start - 1];
-                if(c == ']') { bracket++; start--; continue; }
-                if(c == '[') { if(bracket==0) break; bracket--; start--; continue; }
+                if(c == ']' || c == '>') { bracket++; start--; continue; }
+                if(c == '[' || c == '<') { if(bracket==0) break; bracket--; start--; continue; }
                 if(bracket > 0) { start--; continue; }
                 if(std::isalnum((unsigned char)c) || c == '_' || c == ':' || c == ' ')
                 {
@@ -2317,11 +2340,9 @@ private:
 
             std::string constructorName = "";
             std::string constructorTemplateDef = "";
-            std::string constructorTemplateName= "";
             constructorTemplateDef += indentSpace;
 
             bool isPunctuation = false;
-            bool isTemplate = false;
             bool skipNextSpace = false;
             for(auto itr = generatorLists.begin(); itr != generatorLists.end(); ++itr)
             {
@@ -2389,17 +2410,12 @@ private:
                     {
                         continue;
                     }
-                    else if(tmpPunctuation == "<")
-                    {
-                        isTemplate = true;
-                        continue;
-                    }
-                    else if(tmpPunctuation == ">")
-                    {
-                        isTemplate = false;
-                        constructorName += constructorTemplateName;
-                        continue;
-                    }
+                    // `<` / `>` flow through VERBATIM — same reasoning as the
+                    // member-function path: the filtered rebuild dropped any
+                    // template argument that was not one of the class's own
+                    // template parameters (`Widget(std::shared_ptr<Res> r)`
+                    // emitted `shared_ptr[]`); the whole-file #33 pass does
+                    // the `<...>` -> `[...]` conversion.
                     constructorName += tmpPunctuation;
                     continue;
                 }
@@ -2415,24 +2431,7 @@ private:
                         continue;
                     }
                     skipNextSpace = false;
-                    if(isTemplate)
-                    {
-                        constructorTemplateName = "[";
-                        // auto condition = [](std::string x) {
-                        //  return (x == tmpToken);
-                        // };
-                        // // if(classTemplateNames.contains(tmpToken))
-                        // if(std::any_of(classTemplateNames.begin(), classTemplateNames.end(), condition))
-                        if (std::find(classTemplateNames.begin(), classTemplateNames.end(), tmpToken) != classTemplateNames.end())
-                        {
-                            constructorTemplateName += tmpToken;
-                        }
-                        constructorTemplateName += "]";
-                    }
-                    else
-                    {
-                        constructorName += tmpToken;
-                    }
+                    constructorName += tmpToken;
                     continue;
                 }
                 
@@ -2496,7 +2495,6 @@ private:
             // class 内の Function
             std::string classFunctionDef = "";
             std::string classFunctionName = "";
-            std::string classTemplateName = "";
             std::string nsStr2 = "";
 
             if(false)
@@ -2526,7 +2524,6 @@ private:
             // myReplace(memberFuncDef, nsStr2, "");
 
             bool isPunctuation = false;
-            bool isTemplate = false;
             bool skipNextSpace = false;
             for(auto itr = generatorLists.begin(); itr != generatorLists.end(); ++itr)
             {
@@ -2622,17 +2619,13 @@ private:
                     {
                         continue;
                     }
-                    else if(tmpPunctuation == "<")
-                    {
-                        isTemplate = true;
-                        continue;
-                    }
-                    else if(tmpPunctuation == ">")
-                    {
-                        isTemplate = false;
-                        classFunctionName += classTemplateName;
-                        continue;
-                    }
+                    // `<` / `>` flow through VERBATIM. They used to open a
+                    // filtered rebuild that kept only the class's own template
+                    // parameter names, so a concrete argument vanished:
+                    // `std::shared_ptr<Res> build()` emitted `shared_ptr[]`.
+                    // The whole-file #33 pass already converts every
+                    // identifier-adjacent `<...>` to `[...]` (nested args and
+                    // `operator<` handled), so no rebuild is needed here.
                     classFunctionName += tmpPunctuation;
                     continue;
                 }
@@ -2648,24 +2641,7 @@ private:
                         continue;
                     }
                     skipNextSpace = false;
-                    if(isTemplate)
-                    {
-                        classTemplateName = "[";
-                        // auto condition = [](std::string x) {
-                        //  return (x == tmpToken);
-                        // };
-                        // // if(classTemplateNames.contains(tmpToken))
-                        // if(std::any_of(classTemplateNames.begin(), classTemplateNames.end(), condition))
-                        if (std::find(classTemplateNames.begin(), classTemplateNames.end(), tmpToken) != classTemplateNames.end())
-                        {
-                            classTemplateName += tmpToken;
-                        }
-                        classTemplateName += "]";
-                    }
-                    else
-                    {
-                        classFunctionName += tmpToken;
-                    }
+                    classFunctionName += tmpToken;
                     continue;
                 }
 
