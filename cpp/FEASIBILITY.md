@@ -246,6 +246,18 @@ All corrected and **verified by compiling the output with Cython**:
     has not run yet, so both bracket alphabets must balance. PCL hits
     the method shape constantly (`makeShared()`, `getInputCloud()`);
     fixture: smart_returns.h.
+40. ~~#38's `=`-before-`(` rule truncated operator NAMES: inside a record
+    body, `bool operator>=(...)` hit the `=` of `>=` before any `(` and
+    emitted a silently-broken `bool operator>` (same for `<=`, `==`, and
+    copy assignment `operator=`)~~ → only a LONE `=` counts as an
+    initializer: compound-token neighbours (`<>!+-*/%&|^=` before, `=`
+    after) and a preceding `operator` word mark a signature. Found by the
+    pxd-reviewer probing #39; operator family added to smart_returns.h.
+41. ~~a template struct emitted `cdef struct Box[T]:` — Cython rejects
+    template parameters on `cdef struct`~~ → the #34 promotion pass also
+    promotes any struct header carrying template brackets (a template
+    struct is C++-only, so `cdef cppclass` is always right); covered in
+    templates.h, matching the Python implementation.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 

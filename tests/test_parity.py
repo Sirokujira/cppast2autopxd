@@ -119,6 +119,10 @@ def test_templates(tmp_path):
     assert "T dot(const Vector3[T]& other) except +" in text
     assert "cdef cppclass Array[T, N]:" in text
     assert "T clamp[T](T v, T lo, T hi) except +" in text
+    # a template STRUCT must promote to cppclass (Cython rejects template
+    # parameters on `cdef struct`)
+    assert "cdef cppclass Box[T]:" in text
+    assert "cdef struct Box" not in text
     _cython_ok(
         tmp_path, "templates", text,
         "from templates cimport Vector3, clamp\n"
@@ -219,6 +223,12 @@ def test_smart_returns(tmp_path):
     assert "shared_ptr[T] acquire()" in text
     # operator< survives (not swallowed as a template opener)
     assert "operator<(const Factory& other)" in text
+    # the `=` inside operator NAMES is not an initializer to truncate:
+    # `operator<=`/`>=`/`==` and copy assignment survive whole
+    assert "operator<=(const Factory& other)" in text
+    assert "operator>=(const Factory& other)" in text
+    assert "operator==(const Factory& other)" in text
+    assert "operator=(const Factory& other)" in text
     _cython_ok(
         tmp_path, "smart_returns", text,
         "from smart_returns cimport Factory\n"

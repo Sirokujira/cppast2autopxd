@@ -23,6 +23,10 @@ class Factory {
     std::vector<int> history() const;
     void absorb(std::shared_ptr<Res> extra);
     bool operator<(const Factory& other) const;
+    bool operator<=(const Factory& other) const;
+    bool operator>=(const Factory& other) const;
+    bool operator==(const Factory& other) const;
+    Factory& operator=(const Factory& other);
 };
 
 template <typename T>

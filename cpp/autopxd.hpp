@@ -912,6 +912,13 @@ public:
                 if(body_t.rfind(structKw, 0) != 0 || body_t.empty() || body_t.back() != ':')
                     continue;
 
+                // A TEMPLATE struct header (`cdef struct Box[T]:` — the #33
+                // angle->square pass has already run) is C++-only too, and
+                // Cython rejects template parameters on `cdef struct`; promote
+                // it regardless of what the body holds.
+                bool isTemplateHeader =
+                    body_t.find('[') != std::string::npos;
+
                 bool hasMemberTypedef = false;
                 for(size_t j = i + 1; j < lines.size(); ++j)
                 {
@@ -922,7 +929,7 @@ public:
                     std::string t = lines[j].substr(indentOf(lines[j]));
                     if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
                 }
-                if(hasMemberTypedef)
+                if(hasMemberTypedef || isTemplateHeader)
                     lines[i] = std::string(p, ' ') + "cdef cppclass " +
                                body_t.substr(structKw.size());
             }
@@ -991,6 +998,19 @@ public:
                     else if(t[k] == '(') break;
                     else if(t[k] == '=' && depth == 0)
                     {
+                        // Only a LONE `=` is an initializer. The `=` inside an
+                        // operator NAME reaches this scan before any `(`
+                        // (`bool operator>=(...)`), and truncating there once
+                        // emitted a silently-broken `bool operator>`. Compound
+                        // tokens (`==`, `<=`, `>=`, `!=`, second char of `==`)
+                        // and a preceding `operator` word (copy assignment,
+                        // `Cmp& operator=(...)`) mark a signature: leave the
+                        // whole line alone.
+                        if(k + 1 < t.size() && t[k + 1] == '=') break;
+                        if(k > 0 && std::string("<>!+-*/%&|^=").find(t[k - 1]) != std::string::npos) break;
+                        static const std::string opWord = "operator";
+                        if(k >= opWord.size() &&
+                           t.compare(k - opWord.size(), opWord.size(), opWord) == 0) break;
                         t = t.substr(0, k);
                         while(!t.empty() && (t.back() == ' ' || t.back() == '\t'))
                             t.pop_back();
