@@ -220,17 +220,19 @@ public:
         // single class takes the last_child path), so it is shared by both
         // container_entity_enter branches below.
         auto emitNamespaceHeader = [&]() {
-            if(!namespaceStack.empty() && container_start)
+            // Build from currentNamespaceNames (outermost first, kept in sync
+            // by the namespace enter/exit events below). The old code drained
+            // namespaceStack, which reversed nested namespaces into
+            // "traits::pcl" AND emptied the stack, so siblings after a nested
+            // namespace lost their qualification entirely.
+            if(!currentNamespaceNames.empty() && container_start)
             {
                 std::string headerRef = "\n";
                 headerRef += "cdef extern from \"" + header_name + "\" namespace \"";
-                headerRef += namespaceStack.top();
-                namespaceStack.pop();
-                while(!namespaceStack.empty())
+                for(size_t i = 0; i < currentNamespaceNames.size(); ++i)
                 {
-                    headerRef += "::";
-                    headerRef += namespaceStack.top();
-                    namespaceStack.pop();
+                    if(i) headerRef += "::";
+                    headerRef += currentNamespaceNames[i];
                 }
                 headerRef += "\":\n";
                 refLines.push_back(headerRef);
@@ -325,8 +327,13 @@ public:
                 std::cout << "transparent language_linkage_t\n";
                 return true;
             }
-            else if (e.kind() == cppast::cpp_entity_kind::namespace_t)
+            else if (e.kind() == cppast::cpp_entity_kind::namespace_t &&
+                     info.event == cppast::visitor_info::container_entity_enter)
             {
+                // ENTER only: the visitor also fires this callback on the
+                // container's EXIT event, and pushing there doubled every
+                // namespace ("pcl::traits::traits") once the exit-pop below
+                // stopped the old drain from absorbing the duplicates.
                 std::cout << "namespace_t";
                 std::cout << "\n";
 
@@ -342,6 +349,10 @@ public:
                 namespaceStack.push(e.name());
                 // 非破壊の記録（宣言から修飾子を除去するため）。
                 currentNamespaceNames.push_back(e.name());
+                // Entities inside this namespace need their own extern-from
+                // header (nested namespace, or a namespace re-opened after
+                // one closed).
+                container_start = true;
                 // fout_pxd << '\n';
             }
             else if (info.event == cppast::visitor_info::container_entity_exit)
@@ -349,9 +360,30 @@ public:
                 std::cout << "container_entity_exit";
                 std::cout << "\n";
 
-                // namespace 内に複数のクラス/構造体が定義されている場合を考慮
-                // クラス/構造体を１つずつ管理する？
-                indentCount--;
+                // Leaving a namespace: retract it from both records so
+                // following siblings are qualified by the OUTER scope only,
+                // and re-arm the header emission — the next entity opens a
+                // fresh `cdef extern from` block for that outer scope.
+                if(e.kind() == cppast::cpp_entity_kind::namespace_t)
+                {
+                    if(!currentNamespaceNames.empty() &&
+                       currentNamespaceNames.back() == e.name())
+                        currentNamespaceNames.pop_back();
+                    if(!namespaceStack.empty() && namespaceStack.top() == e.name())
+                        namespaceStack.pop();
+                    container_start = true;
+                }
+                else
+                {
+                    // namespace 内に複数のクラス/構造体が定義されている場合を考慮
+                    // クラス/構造体を１つずつ管理する？
+                    // A namespace exit must NOT decrement: namespaces never
+                    // incremented indent (the extern-from block header is the
+                    // indent provider). Before the enter-only guard above,
+                    // namespace exits re-entered the namespace_t branch and
+                    // never reached this decrement — keep that behavior.
+                    indentCount--;
+                }
                 std::cout << "indentCount: ";
                 std::cout << indentCount;
                 std::cout << "\n";
@@ -519,6 +551,24 @@ public:
                         mod = mod.substr(0, mod.find(' '));            // libc.string
                         std::string modLeaf = mod.substr(mod.find_last_of('.') + 1);
                         if(modLeaf == symbol) bogus = true;
+                    }
+                    else if(trimmed.rfind("from libcpp.", 0) == 0)
+                    {
+                        // Most libcpp modules DO export a self-named symbol
+                        // (string, vector, map, pair...), so leaf == symbol is
+                        // bogus only for the modules verified with the real
+                        // cython compiler to export none — `<algorithm>` in
+                        // pcl/PolygonMesh.h produced `from libcpp.algorithm
+                        // cimport algorithm`, an unresolvable import.
+                        static const char* noSelfSymbol[] = {
+                            "algorithm", "cast", "functional", "limits",
+                            "memory", "typeindex", "typeinfo", "utility"};
+                        std::string mod = trimmed.substr(5);
+                        mod = mod.substr(0, mod.find(' '));
+                        std::string modLeaf = mod.substr(mod.find_last_of('.') + 1);
+                        if(modLeaf == symbol)
+                            for(const char* m : noSelfSymbol)
+                                if(modLeaf == m) { bogus = true; break; }
                     }
 
                     // De-duplicate by the imported symbol (the last token): the
@@ -789,12 +839,8 @@ public:
         //     from Cython and only produce parser warnings/noise
         // Each dropped line is kept as a comment for auditability.
         {
-            auto hasDeniedIdent = [](const std::string& s) -> bool {
-                static const char* deny[] = {
-                    "ostream", "istream", "iostream", "wostream", "wistream",
-                    "basic_ostream", "basic_istream", "streambuf",
-                    "ofstream", "ifstream", "fstream", "stringstream",
-                    "ostringstream", "istringstream"};
+            auto hasIdentFrom = [](const std::string& s,
+                                   const char* const* deny, size_t n) -> bool {
                 size_t i = 0;
                 while(i < s.size())
                 {
@@ -805,10 +851,51 @@ public:
                               (std::isalnum((unsigned char)s[i]) || s[i] == '_'))
                             i++;
                         std::string tok = s.substr(b, i - b);
-                        for(const char* d : deny)
-                            if(tok == d) return true;
+                        for(size_t d = 0; d < n; ++d)
+                            if(tok == deny[d]) return true;
                     }
                     else i++;
+                }
+                return false;
+            };
+            static const char* denyIostream[] = {
+                "ostream", "istream", "iostream", "wostream", "wistream",
+                "basic_ostream", "basic_istream", "streambuf",
+                "ofstream", "ifstream", "fstream", "stringstream",
+                "ostringstream", "istringstream"};
+            // std types Cython ships no libcpp module for (pcl/point_types.h
+            // carries a std::bitset member).
+            static const char* denyNoModule[] = { "bitset" };
+            auto hasDeniedIdent = [&](const std::string& s) -> bool {
+                return hasIdentFrom(s, denyIostream,
+                                    sizeof(denyIostream) / sizeof(*denyIostream));
+            };
+            // Operator overloads Cython cannot express: the compound
+            // assignments and `->` (pcl/PolygonMesh.h concatenates with
+            // `operator+=`; plain `operator+` stays supported).
+            auto hasDeniedOperator = [](const std::string& s) -> bool {
+                static const char* denyOps[] = {
+                    "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+                    "<<=", ">>=", "->"};
+                size_t pos = s.find("operator");
+                while(pos != std::string::npos)
+                {
+                    size_t k = pos + 8;
+                    while(k < s.size() && s[k] == ' ') k++;
+                    // longest match first so `<<=` is not read as `<<`
+                    for(const char* op : denyOps)
+                    {
+                        size_t len = std::char_traits<char>::length(op);
+                        if(s.compare(k, len, op) == 0)
+                        {
+                            // `->` must not match a lone `-`; compound ops end
+                            // in `=`, so require the NEXT char not extend the
+                            // token into a supported operator (`-` vs `->`).
+                            if(op[len - 1] == '=' || s.compare(k, 2, "->") == 0)
+                                return true;
+                        }
+                    }
+                    pos = s.find("operator", pos + 8);
                 }
                 return false;
             };
@@ -831,6 +918,12 @@ public:
                 {
                     if(body_t.rfind("#", 0) != 0 && hasDeniedIdent(body_t))
                         why = "std iostreams have no Cython libcpp module";
+                    else if(body_t.rfind("#", 0) != 0 &&
+                            hasIdentFrom(body_t, denyNoModule,
+                                         sizeof(denyNoModule) / sizeof(*denyNoModule)))
+                        why = "no Cython libcpp module for this std type";
+                    else if(body_t.rfind("#", 0) != 0 && hasDeniedOperator(body_t))
+                        why = "operator overload not supported in Cython";
                     else if(body_t.find("&&") != std::string::npos)
                         why = "rvalue references not supported in Cython";
                 }
@@ -930,8 +1023,29 @@ public:
                     if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
                 }
                 if(hasMemberTypedef || isTemplateHeader)
+                {
                     lines[i] = std::string(p, ' ') + "cdef cppclass " +
                                body_t.substr(structKw.size());
+                    // Nested declarations inside a cppclass drop the `cdef`
+                    // keyword (a nested `cdef enum X:` is a syntax error —
+                    // pcl/PCLPointField.h's PointFieldTypes). Strip it from
+                    // any deeper block header in the promoted body.
+                    for(size_t j = i + 1; j < lines.size(); ++j)
+                    {
+                        if(lines[j].find_first_not_of(" \t") == std::string::npos)
+                            continue;
+                        int ind = indentOf(lines[j]);
+                        if(ind <= p) break;
+                        std::string bt = lines[j].substr(ind);
+                        std::string btTrim = bt;
+                        while(!btTrim.empty() &&
+                              (btTrim.back() == ' ' || btTrim.back() == '\t'))
+                            btTrim.pop_back();
+                        if(!btTrim.empty() && btTrim.back() == ':' &&
+                           bt.rfind("cdef ", 0) == 0)
+                            lines[j] = std::string(ind, ' ') + bt.substr(5);
+                    }
+                }
             }
 
             rest.clear();
@@ -1574,6 +1688,10 @@ private:
             }
             for(const auto& p : prefixes)
             {
+                // PCL spells self-references with a global qualifier
+                // (`shared_ptr< ::pcl::PCLPointField>`); try the `::`-prefixed
+                // form FIRST or plain removal would strand a dangling `::`.
+                myReplace(s, "::" + p, "");
                 myReplace(s, p, "");
             }
         }
@@ -2507,15 +2625,15 @@ private:
                 classFunctionDef += "\n";
             }
 
-            if(!namespaceStack.empty())
             {
-                nsStr2 += namespaceStack.top();
-                namespaceStack.pop();
-                while(!namespaceStack.empty())
+                // iterate a COPY: draining the real stack here broke the
+                // namespace bookkeeping for every entity after the first.
+                std::stack<std::string> nsCopy = namespaceStack;
+                while(!nsCopy.empty())
                 {
-                    nsStr2 += "::";
-                    nsStr2 += namespaceStack.top();
-                    namespaceStack.pop();
+                    if(!nsStr2.empty()) nsStr2 += "::";
+                    nsStr2 += nsCopy.top();
+                    nsCopy.pop();
                 }
             }
             classFunctionDef += indentSpace;
@@ -2759,7 +2877,14 @@ private:
                 IdentifierGenerator *sa = dynamic_cast<IdentifierGenerator*>(*itr);
                 if(sa != nullptr)
                 {
-                    enumValueName = sa->GetString();
+                    // FIRST identifier wins: it is the member name. A non-
+                    // literal value expression can contain identifiers of its
+                    // own (`BOOL = traits::asEnum_v<bool>` — the `bool` inside
+                    // the template argument), and last-wins replaced the
+                    // member name with them. Qualified pieces arrive as
+                    // reference tokens, which is why only some members broke.
+                    if(enumValueName.empty())
+                        enumValueName = sa->GetString();
                     continue;
                 }
 
@@ -2812,15 +2937,16 @@ private:
                 enumValueDef += "\"";
                 // enumValueDef += ns_str;
                 // enumValueDef += "::";
-                if(!namespaceStack.empty())
                 {
-                    enumValueDef += namespaceStack.top();
-                    namespaceStack.pop();
-                    while(!namespaceStack.empty())
+                    // COPY for the same reason as the member-function path.
+                    std::stack<std::string> nsCopy = namespaceStack;
+                    bool first = true;
+                    while(!nsCopy.empty())
                     {
-                        enumValueDef += "::";
-                        enumValueDef += namespaceStack.top();
-                        namespaceStack.pop();
+                        if(!first) enumValueDef += "::";
+                        first = false;
+                        enumValueDef += nsCopy.top();
+                        nsCopy.pop();
                     }
                 }
                 // enumValueDef += "ClassName";
