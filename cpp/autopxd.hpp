@@ -885,6 +885,121 @@ public:
             rest = filtered;
         }
 
+        // Promote a `cdef struct` whose body contains member typedefs to
+        // `cdef cppclass`: Cython rejects `ctypedef` inside a struct body but
+        // accepts it inside a cppclass, and a struct carrying member typedefs
+        // is necessarily C++ (the construct does not exist in C), so the
+        // promotion is safe. This is what pcl/PCLHeader.h looks like
+        // (`typedef std::shared_ptr<PCLHeader> Ptr;` inside a struct) and it
+        // mirrors what the Python implementation emits for that header.
+        {
+            std::vector<std::string> lines;
+            std::string line;
+            std::istringstream iss(rest);
+            while(std::getline(iss, line)) lines.push_back(line);
+
+            auto indentOf = [](const std::string& s) -> int {
+                int n = 0; while(n < (int)s.size() && s[n] == ' ') n++; return n;
+            };
+
+            static const std::string structKw = "cdef struct ";
+            for(size_t i = 0; i < lines.size(); ++i)
+            {
+                int p = indentOf(lines[i]);
+                std::string body_t = lines[i].substr(p);
+                while(!body_t.empty() && (body_t.back() == ' ' || body_t.back() == '\t'))
+                    body_t.pop_back();
+                if(body_t.rfind(structKw, 0) != 0 || body_t.empty() || body_t.back() != ':')
+                    continue;
+
+                bool hasMemberTypedef = false;
+                for(size_t j = i + 1; j < lines.size(); ++j)
+                {
+                    if(lines[j].find_first_not_of(" \t") == std::string::npos)
+                        continue;                       // blank line: still in body
+                    if(indentOf(lines[j]) <= p)
+                        break;                          // dedent: body ended
+                    std::string t = lines[j].substr(indentOf(lines[j]));
+                    if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
+                }
+                if(hasMemberTypedef)
+                    lines[i] = std::string(p, ' ') + "cdef cppclass " +
+                               body_t.substr(structKw.size());
+            }
+
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
+        // Drop default member initializers on record fields: PCL's structs use
+        // C++11 in-class initializers (`std::uint32_t seq = 0`) and the field
+        // emitter carries them through as `uint32_t seq=0`, which Cython
+        // rejects inside a `cdef struct` / `cdef cppclass`. Truncate at the
+        // first top-level `=`. Only lines inside a record body are touched —
+        // enum members (`RED = 0`) keep their values, and method declarations
+        // (any line containing a parenthesis) are left alone.
+        {
+            std::vector<std::string> lines;
+            std::string line;
+            std::istringstream iss(rest);
+            while(std::getline(iss, line)) lines.push_back(line);
+
+            auto indentOf = [](const std::string& s) -> int {
+                int n = 0; while(n < (int)s.size() && s[n] == ' ') n++; return n;
+            };
+
+            // innermost open blocks: (indent, isRecord)
+            std::vector<std::pair<int, bool>> blockStack;
+            for(auto& l : lines)
+            {
+                if(l.find_first_not_of(" \t") == std::string::npos)
+                    continue;                           // blank line keeps context
+                int ind = indentOf(l);
+                while(!blockStack.empty() && blockStack.back().first >= ind)
+                    blockStack.pop_back();
+
+                std::string t = l.substr(ind);
+                while(!t.empty() && (t.back() == ' ' || t.back() == '\t')) t.pop_back();
+
+                if(!t.empty() && t.back() == ':' && t.rfind("cdef extern from", 0) != 0)
+                {
+                    bool isRecord = t.rfind("cdef struct ", 0) == 0 ||
+                                    t.rfind("cdef cppclass ", 0) == 0 ||
+                                    t.rfind("ctypedef struct ", 0) == 0 ||
+                                    t.rfind("cdef union ", 0) == 0;
+                    // enums (`cdef enum X:` / class-nested `enum X:`) push a
+                    // non-record block so their members keep `= value`.
+                    blockStack.push_back({ind, isRecord});
+                    continue;
+                }
+
+                bool inRecord = !blockStack.empty() && blockStack.back().second;
+                if(!inRecord || t.rfind("#", 0) == 0 || t.rfind("ctypedef ", 0) == 0 ||
+                   t.find('(') != std::string::npos)
+                    continue;
+
+                // truncate at the first `=` outside [] (template args carry none
+                // today, but stay safe) and re-trim the field text.
+                int depth = 0;
+                for(size_t k = 0; k < t.size(); ++k)
+                {
+                    if(t[k] == '[') depth++;
+                    else if(t[k] == ']') depth--;
+                    else if(t[k] == '=' && depth == 0)
+                    {
+                        t = t.substr(0, k);
+                        while(!t.empty() && (t.back() == ' ' || t.back() == '\t'))
+                            t.pop_back();
+                        l = std::string(ind, ' ') + t;
+                        break;
+                    }
+                }
+            }
+
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
         // Symbol-driven stdint imports: the include-directive mapping misses
         // the C++ spellings (<cstdint>) and transitive includes, so scan the
         // final body for stdint type tokens and import each one actually
@@ -946,6 +1061,48 @@ public:
             {
                 importedSymbols.push_back("bool");
                 importLines.push_back("from libcpp cimport bool");
+            }
+        }
+
+        // Symbol-driven libcpp.memory imports (same shape as the stdint pass):
+        // the include mapping imported all three smart-pointer names whenever
+        // `<memory>` was seen — leaving unused `unique_ptr`/`weak_ptr` noise —
+        // and none at all when `shared_ptr` only arrives transitively (e.g.
+        // referenced by a member typedef in a header that never includes
+        // `<memory>` directly). Re-derive from actual use in the final body:
+        // add the missing, drop the unused.
+        {
+            static const char* memSyms[] = { "unique_ptr", "shared_ptr", "weak_ptr" };
+            for(const char* sym : memSyms)
+            {
+                const std::string symStr = sym;
+                bool used = false;
+                size_t pos = 0;
+                while(!used && (pos = rest.find(symStr, pos)) != std::string::npos)
+                {
+                    bool leftOk = pos == 0 ||
+                        (!std::isalnum((unsigned char)rest[pos - 1]) && rest[pos - 1] != '_');
+                    size_t after = pos + symStr.size();
+                    bool rightOk = after >= rest.size() ||
+                        (!std::isalnum((unsigned char)rest[after]) && rest[after] != '_');
+                    if(leftOk && rightOk) used = true;
+                    pos += symStr.size();
+                }
+
+                auto symIt = std::find(importedSymbols.begin(), importedSymbols.end(), symStr);
+                if(used && symIt == importedSymbols.end())
+                {
+                    importedSymbols.push_back(symStr);
+                    importLines.push_back("from libcpp.memory cimport " + symStr);
+                }
+                else if(!used && symIt != importedSymbols.end())
+                {
+                    importedSymbols.erase(symIt);
+                    importLines.erase(
+                        std::remove(importLines.begin(), importLines.end(),
+                                    "from libcpp.memory cimport " + symStr),
+                        importLines.end());
+                }
             }
         }
 
@@ -1393,12 +1550,17 @@ private:
                 myReplace(s, p, "");
             }
         }
-        // Also strip the enclosing class scope (e.g. `Status::Code` -> `Code`
-        // inside `cdef cppclass Status`). Cython refers to a nested type by its
-        // bare name within the class body.
+        // Convert a class scope to Cython's dot spelling (`PCLHeader::Ptr` ->
+        // `PCLHeader.Ptr`). currentClassNames is a classes-seen-so-far list,
+        // not a scope stack, so plain deletion here broke references OUTSIDE
+        // the class (`using HeaderPtr = PCLHeader::Ptr;` at namespace scope
+        // became the undefined bare `Ptr`). The dot form is verified valid in
+        // BOTH positions — at namespace scope and inside the class's own body
+        // (`Status.Code get()` within `cdef cppclass Status`) — so no
+        // context tracking is needed.
         for(const auto& c : currentClassNames)
         {
-            myReplace(s, c + "::", "");
+            myReplace(s, c + "::", c + ".");
         }
         return s;
     }

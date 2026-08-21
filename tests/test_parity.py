@@ -171,3 +171,30 @@ def test_statuslike(tmp_path):
         "def f():\n    cdef Status* s = new Status()\n"
         "    ok = s.ok()\n    del s\n    return ok\n",
     )
+
+
+def test_pcl_header(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "pcl_header.h"),
+        extern_from="pcl_header.h",
+        namespaces=["pcl"],
+    )
+    text = result.text
+    # struct with member typedefs promotes to cppclass; C++11 default member
+    # initializers are dropped from the fields
+    assert "cdef cppclass PCLHeader:" in text
+    assert "uint32_t seq" in text
+    assert "seq = 0" not in text and "seq=0" not in text
+    assert "ctypedef shared_ptr[PCLHeader] Ptr" in text
+    # namespace-scope aliases to a member typedef use Cython's dot spelling,
+    # not a bare (undefined) `Ptr`
+    assert "ctypedef PCLHeader.Ptr HeaderPtr" in text
+    assert "ctypedef PCLHeader.ConstPtr HeaderConstPtr" in text
+    # smart-pointer import present exactly because shared_ptr is used
+    assert "from libcpp.memory cimport shared_ptr" in text
+    assert "unique_ptr" not in text
+    _cython_ok(
+        tmp_path, "pcl_header", text,
+        "from pcl_header cimport PCLHeader, HeaderPtr\n"
+        "def f():\n    cdef HeaderPtr h\n    return h.use_count()\n",
+    )
