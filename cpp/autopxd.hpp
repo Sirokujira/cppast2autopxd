@@ -974,17 +974,21 @@ public:
                 }
 
                 bool inRecord = !blockStack.empty() && blockStack.back().second;
-                if(!inRecord || t.rfind("#", 0) == 0 || t.rfind("ctypedef ", 0) == 0 ||
-                   t.find('(') != std::string::npos)
+                if(!inRecord || t.rfind("#", 0) == 0 || t.rfind("ctypedef ", 0) == 0)
                     continue;
 
                 // truncate at the first `=` outside [] (template args carry none
-                // today, but stay safe) and re-trim the field text.
+                // today, but stay safe) and re-trim the field text. A `(`
+                // BEFORE that `=` means the line is a signature (method or
+                // function pointer) whose `=` is a default argument — leave it
+                // alone; a `(` AFTER it is just part of the initializer
+                // expression (`int z = int(3)`), which still truncates.
                 int depth = 0;
                 for(size_t k = 0; k < t.size(); ++k)
                 {
                     if(t[k] == '[') depth++;
                     else if(t[k] == ']') depth--;
+                    else if(t[k] == '(') break;
                     else if(t[k] == '=' && depth == 0)
                     {
                         t = t.substr(0, k);

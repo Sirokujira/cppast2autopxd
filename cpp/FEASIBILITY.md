@@ -226,6 +226,13 @@ All corrected and **verified by compiling the output with Cython**:
     Cython's dot spelling (`PCLHeader.Ptr`), verified valid both at
     namespace scope and inside the class's own body, so #7's inside-class
     case still compiles (`Status.Code get()`).
+38. ~~paren-shaped default member initializers leaked broken text silently
+    (`int z = int(3);` → `int z=int(3)`, cython FAIL with no `# skipped:`)~~
+    → #35's signature guard refined from "any line containing `(`" to
+    "a `(` BEFORE the first top-level `=`": a leading paren marks a
+    signature whose `=` is a default argument (left untouched), a paren
+    after the `=` is just initializer expression and truncates. Found by
+    the pxd-reviewer probing #35's escape hatch; covered in coverage.h.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -238,7 +245,7 @@ database and `pcl/PCLHeader.h` generates. Two caveats:
 - **`--fast_preprocessing` is required for Boost-macro-heavy headers** —
   cppast's own preprocessing mangles `#include BOOST_PP_STRINGIZE(...)`
   (trailing `/**/` survives into the computed path) and errors out.
-- ~~Known emission gaps on real-PCL constructs~~ — closed by #34-#37 below;
+- ~~Known emission gaps on real-PCL constructs~~ — closed by #34-#37 above;
   the real `pcl/PCLHeader.h` (PCL 1.14, via `--fast_preprocessing`) now
   generates `[cython OK]`, matching the Python implementation's output.
 
@@ -260,6 +267,13 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    that header passes.)
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
+3. **Smart-pointer by-value RETURN types lose their template argument**
+   (`std::shared_ptr<Res> make();` → `shared_ptr[] make()`, cython FAIL).
+   Fields and parameters emit correctly (`shared_ptr[Res] sp_field`); the
+   gap is in return-type emission and predates the #34-#38 passes
+   (reproduced byte-identically with the parent-commit binary). No
+   committed fixture exercises the shape yet — take it with its own
+   fixture in a future pass.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
    (they `#include` siblings); the committed `templates.h` / `vectord.h` /
    `statuslike.h` fixtures exercise the same constructs self-containedly.

@@ -75,4 +75,14 @@ class Array {
   int size() const;
 };
 
+// --- default member initializers, paren-shaped included ---
+// (`= 0` shapes are covered by pcl_header.h; the paren shape once leaked
+// broken text: `int z=int(3)`. A `(` before the `=` marks a signature and
+// must stay untouched — `set_z` keeps its default argument.)
+struct Defaults {
+  int z = int(3);
+  double ratio = (1.0 / 3.0);
+  void set_z(int z_ = int(3));
+};
+
 }  // namespace cov
