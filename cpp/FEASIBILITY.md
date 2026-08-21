@@ -33,14 +33,14 @@ draco). This records what works today, the environment, and the gaps.
 
 ## Verified results (`./run_tests.sh`)
 
-All twelve committed fixtures generate AND pass Cython validation (a `cython`
+All eleven committed fixtures generate AND pass Cython validation (a `cython`
 binary on `PATH`, or `CYTHON=/path`, enables the `[cython OK]` check):
 
 ```
 OK    c_api                          708 bytes  (21 AST visits)  [cython OK]
 OK    coverage                      1343 bytes  (66 AST visits)  [cython OK]
 OK    pcl_header                     469 bytes  (16 AST visits)  [cython OK]
-OK    pcl_message                    684 bytes  (35 AST visits)  [cython OK]
+OK    pcl_message                    798 bytes  (35 AST visits)  [cython OK]
 OK    pcl_point_cloud                939 bytes  (32 AST visits)  [cython OK]
 OK    pcl_point_types               1192 bytes  (115 AST visits)  [cython OK]
 OK    simple                         824 bytes  (33 AST visits)  [cython OK]
@@ -263,9 +263,11 @@ All corrected and **verified by compiling the output with Cython**:
 ### Real-PCL message-header pass (`tests/input/pcl_message.h`)
 
 Mirrors PCLPointField.h / PCLPointCloud2.h / PolygonMesh.h. The sweep of
-nine real PCL 1.14 headers went from 1/9 to 3/9 `[cython OK]`
-(PCLHeader, PCLPointCloud2, point_types), with every remaining failure
-in the single cross-header family recorded under limitations below.
+nine real PCL 1.14 headers went from 1/9 to 2/9 `[cython OK]`
+(PCLHeader, point_types — an earlier 3/9 claim here was a stale-file
+artifact in the sweep harness, caught by the pxd-reviewer). The
+remaining failures are the two families recorded under limitations
+below: cross-header names (1b) and member function templates (1c).
 
 42. ~~enum member names were REPLACED by identifiers inside their own
     value expressions (`BOOL = traits::asEnum_v<bool>` emitted a member
@@ -340,6 +342,16 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    The Python implementation solves it with known-name tracking plus
    cimports/extra_cimports; the C++ counterpart needs the same design —
    worth a dedicated pass with a multi-header or --extra-cimport mode.
+1c. **Member FUNCTION templates lose their parameter list** —
+   `template <typename T> T& at(...)` inside PCLPointCloud2 emits a bare
+   `T& at(...)` with no `[T]`, so `T` is undefined (class templates and
+   FREE function templates emit correctly). Pre-existing; second family
+   failing the real-PCL sweep.
+1d. **A `const` method on an UNPROMOTED `cdef struct` emits invalid text
+   silently** — `Ops operator+(...) nogil const` inside `cdef struct` is
+   rejected by cython with no `# skipped:` comment (the same construct
+   inside a promoted cppclass is fine). Found by the pxd-reviewer probing
+   #45; pre-existing, needs its own fixture + fix.
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
