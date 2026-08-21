@@ -234,3 +234,33 @@ def test_smart_returns(tmp_path):
         "from smart_returns cimport Factory\n"
         "def f():\n    cdef Factory fac\n    return fac.build().use_count()\n",
     )
+
+
+def test_pcl_message(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "pcl_message.h"),
+        extern_from="pcl_message.h",
+        namespaces=["pcl"],
+    )
+    text = result.text
+    # the nested namespace (pcl::traits) must not pollute the extern header
+    assert 'namespace "pcl"' in text
+    assert "traits" not in text
+    # nested enum: member names survive their non-literal value expressions
+    assert "enum FieldTypes:" in text
+    assert "BOOL" in text and "FLOAT32" in text and "UNSET" in text
+    assert "bool\n" not in text  # the value expression's template arg is not a member
+    # globally-qualified self references resolve to the bare name
+    assert "shared_ptr[PCLField] Ptr" in text
+    assert "::" not in text.replace('nogil:', '')
+    # inexpressible members are absent here (the Python impl warn-skips);
+    # supported neighbours stay
+    assert "bitset" not in text
+    assert "operator+=" not in text
+    assert "operator+(const PCLMesh& rhs)" in text
+    assert "ctypedef PCLField.Ptr PCLFieldPtr" in text
+    _cython_ok(
+        tmp_path, "pcl_message", text,
+        "from pcl_message cimport PCLField, PCLMesh, PCLFieldPtr\n"
+        "def f():\n    cdef PCLFieldPtr p\n    return p.use_count()\n",
+    )

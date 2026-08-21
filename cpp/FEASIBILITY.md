@@ -33,19 +33,20 @@ draco). This records what works today, the environment, and the gaps.
 
 ## Verified results (`./run_tests.sh`)
 
-All ten committed fixtures generate AND pass Cython validation (a `cython`
+All twelve committed fixtures generate AND pass Cython validation (a `cython`
 binary on `PATH`, or `CYTHON=/path`, enables the `[cython OK]` check):
 
 ```
 OK    c_api                          708 bytes  (21 AST visits)  [cython OK]
-OK    coverage                      1242 bytes  (61 AST visits)  [cython OK]
+OK    coverage                      1343 bytes  (66 AST visits)  [cython OK]
 OK    pcl_header                     469 bytes  (16 AST visits)  [cython OK]
+OK    pcl_message                    684 bytes  (35 AST visits)  [cython OK]
 OK    pcl_point_cloud                939 bytes  (32 AST visits)  [cython OK]
 OK    pcl_point_types               1192 bytes  (115 AST visits)  [cython OK]
 OK    simple                         824 bytes  (33 AST visits)  [cython OK]
-OK    smart_returns                  576 bytes  (25 AST visits)  [cython OK]
+OK    smart_returns                  805 bytes  (29 AST visits)  [cython OK]
 OK    statuslike                     621 bytes  (25 AST visits)  [cython OK]
-OK    templates                      667 bytes  (29 AST visits)  [cython OK]
+OK    templates                      705 bytes  (34 AST visits)  [cython OK]
 OK    vectord                        821 bytes  (23 AST visits)  [cython OK]
 ```
 
@@ -259,6 +260,46 @@ All corrected and **verified by compiling the output with Cython**:
     struct is C++-only, so `cdef cppclass` is always right); covered in
     templates.h, matching the Python implementation.
 
+### Real-PCL message-header pass (`tests/input/pcl_message.h`)
+
+Mirrors PCLPointField.h / PCLPointCloud2.h / PolygonMesh.h. The sweep of
+nine real PCL 1.14 headers went from 1/9 to 3/9 `[cython OK]`
+(PCLHeader, PCLPointCloud2, point_types), with every remaining failure
+in the single cross-header family recorded under limitations below.
+
+42. ~~enum member names were REPLACED by identifiers inside their own
+    value expressions (`BOOL = traits::asEnum_v<bool>` emitted a member
+    named `bool` — qualified pieces arrive as reference tokens, which is
+    why only some members broke)~~ → the FIRST identifier is the member
+    name; non-literal values already drop, leaving a valid bare member.
+43. ~~a nested `cdef enum` header inside a #34-promoted struct~~ → the
+    promotion strips `cdef ` from every deeper block header (Cython drops
+    the keyword on declarations nested in a cppclass).
+44. ~~globally-qualified self references (` ::pcl::PCLField` — PCL's own
+    spelling) left a dangling `::` after namespace-prefix removal~~ →
+    stripNamespaceQualifiers tries the `::`-prefixed form of each prefix
+    first.
+45. ~~`operator+=` (PolygonMesh concatenation) and `std::bitset` members
+    (point_types.h) emitted verbatim, cython FAIL~~ → both skip with a
+    reason: compound-assignment operators and `->` are inexpressible in
+    Cython; `bitset` joins the no-libcpp-module deny list.
+46. ~~`#include <algorithm>` produced `from libcpp.algorithm cimport
+    algorithm` — an unresolvable import~~ → the #15 bogus-self-import rule
+    now covers `libcpp.` for the modules verified with the real cython
+    compiler to export no self-named symbol (algorithm, cast, functional,
+    limits, memory, typeindex, typeinfo, utility); string/vector/map/pair
+    and the other self-named modules stay importable.
+47. ~~a nested namespace corrupted everything after it: the extern-from
+    header drained `namespaceStack` in reverse (`"traits::pcl"`), the
+    namespace_t branch also ran on EXIT events (doubling every name once
+    the drain stopped absorbing duplicates), and namespace exits then
+    over-decremented the indent, dropping the extern header entirely~~ →
+    the header is built from `currentNamespaceNames` (outermost first,
+    non-destructive), namespaces push on ENTER only and pop on exit,
+    `container_start` re-arms at every namespace boundary so siblings
+    after a nested namespace open a fresh correctly-qualified block, and
+    namespace exits no longer touch the indent.
+
 ### Compilation-database mode (real PCL, verified on Linux)
 
 `--database_dir <build> --database_file <a-TU-in-the-db>` feeds cppast the
@@ -290,6 +331,15 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    manual editing or a curated cimport map. (This is the only failure left in
    the fetched `status.h`; the committed `statuslike.h` covering the rest of
    that header passes.)
+1b. **Cross-header names do not resolve** — the tool has no name-resolution
+   layer, so a type declared in a SIBLING header emits by its bare name and
+   cython rejects it: `PCLHeader header` (PCLImage.h/ModelCoefficients.h/
+   PolygonMesh.h), `uindex_t`/`Indices` from pcl/types.h (PCLPointField.h/
+   Vertices.h). This is now the ONLY family failing in the nine-header
+   real-PCL sweep (plus types.h's template metaprogramming, out of scope).
+   The Python implementation solves it with known-name tracking plus
+   cimports/extra_cimports; the C++ counterpart needs the same design —
+   worth a dedicated pass with a multi-header or --extra-cimport mode.
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
