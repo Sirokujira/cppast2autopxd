@@ -33,13 +33,17 @@ draco). This records what works today, the environment, and the gaps.
 
 ## Verified results (`./run_tests.sh`)
 
-All five committed fixtures generate AND pass Cython validation (a `cython`
+All nine committed fixtures generate AND pass Cython validation (a `cython`
 binary on `PATH`, or `CYTHON=/path`, enables the `[cython OK]` check):
 
 ```
 OK    c_api                          708 bytes  (21 AST visits)  [cython OK]
+OK    coverage                      1242 bytes  (61 AST visits)  [cython OK]
+OK    pcl_header                     469 bytes  (16 AST visits)  [cython OK]
+OK    pcl_point_cloud                939 bytes  (32 AST visits)  [cython OK]
+OK    pcl_point_types               1192 bytes  (115 AST visits)  [cython OK]
 OK    simple                         824 bytes  (33 AST visits)  [cython OK]
-OK    statuslike                     519 bytes  (25 AST visits)  [cython OK]
+OK    statuslike                     621 bytes  (25 AST visits)  [cython OK]
 OK    templates                      667 bytes  (29 AST visits)  [cython OK]
 OK    vectord                        821 bytes  (23 AST visits)  [cython OK]
 ```
@@ -202,6 +206,34 @@ All corrected and **verified by compiling the output with Cython**:
     a whole-file depth-counting pass converts every remaining template
     `<...>` to `[...]` (identifier-adjacent, `operator<`/`<<` untouched).
 
+### Real-PCL pass (driven by `tests/input/pcl_header.h`, mirroring `pcl/PCLHeader.h`)
+
+34. ~~member typedefs emitted inside `cdef struct` bodies (Cython rejects
+    `ctypedef` there)~~ → a struct whose body contains member typedefs is
+    promoted to `cdef cppclass` (the construct is C++-only, so promotion is
+    safe; matches the Python implementation on `pcl/PCLHeader.h`).
+35. ~~C++11 default member initializers leaked (`uint32_t seq=0`)~~ → field
+    lines inside record bodies truncate at the first top-level `=`; enum
+    members (`RED = 0`) and method declarations are untouched.
+36. ~~libcpp.memory imports were include-driven: `<memory>` imported all of
+    `unique_ptr`/`shared_ptr`/`weak_ptr` (unused noise), while `shared_ptr`
+    arriving only transitively got no import at all~~ → symbol-driven pass
+    (same shape as #32): scan the final body for word-boundary uses, add the
+    missing, drop the unused.
+37. ~~enclosing-class scope was deleted everywhere (`PCLHeader::Ptr` →
+    bare `Ptr`), leaving namespace-scope aliases to a member typedef
+    (`using HeaderPtr = PCLHeader::Ptr;`) undefined~~ → converted to
+    Cython's dot spelling (`PCLHeader.Ptr`), verified valid both at
+    namespace scope and inside the class's own body, so #7's inside-class
+    case still compiles (`Status.Code get()`).
+38. ~~paren-shaped default member initializers leaked broken text silently
+    (`int z = int(3);` → `int z=int(3)`, cython FAIL with no `# skipped:`)~~
+    → #35's signature guard refined from "any line containing `(`" to
+    "a `(` BEFORE the first top-level `=`": a leading paren marks a
+    signature whose `=` is a default argument (left untouched), a paren
+    after the `=` is just initializer expression and truncates. Found by
+    the pxd-reviewer probing #35's escape hatch; covered in coverage.h.
+
 ### Compilation-database mode (real PCL, verified on Linux)
 
 `--database_dir <build> --database_file <a-TU-in-the-db>` feeds cppast the
@@ -213,11 +245,9 @@ database and `pcl/PCLHeader.h` generates. Two caveats:
 - **`--fast_preprocessing` is required for Boost-macro-heavy headers** —
   cppast's own preprocessing mangles `#include BOOST_PP_STRINGIZE(...)`
   (trailing `/**/` survives into the computed path) and errors out.
-- Known emission gaps on real-PCL constructs (tracked for a future pass):
-  field default initializers leak (`uint32_t seq=0`), member typedefs
-  emit inside `cdef struct` bodies where Cython rejects them, and
-  `shared_ptr` referenced by member typedefs misses its cimport. The
-  Python implementation handles these headers cleanly today.
+- ~~Known emission gaps on real-PCL constructs~~ — closed by #34-#37 above;
+  the real `pcl/PCLHeader.h` (PCL 1.14, via `--fast_preprocessing`) now
+  generates `[cython OK]`, matching the Python implementation's output.
 
 ## `.pyd` (Windows)
 
@@ -237,6 +267,13 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    that header passes.)
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
+3. **Smart-pointer by-value RETURN types lose their template argument**
+   (`std::shared_ptr<Res> make();` → `shared_ptr[] make()`, cython FAIL).
+   Fields and parameters emit correctly (`shared_ptr[Res] sp_field`); the
+   gap is in return-type emission and predates the #34-#38 passes
+   (reproduced byte-identically with the parent-commit binary). No
+   committed fixture exercises the shape yet — take it with its own
+   fixture in a future pass.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
    (they `#include` siblings); the committed `templates.h` / `vectord.h` /
    `statuslike.h` fixtures exercise the same constructs self-containedly.
