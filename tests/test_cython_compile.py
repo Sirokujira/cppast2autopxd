@@ -167,3 +167,36 @@ def test_generated_pxd_passes_cython(tmp_path):
         f"cython rejected generated pxd files:\n{proc.stdout}\n{proc.stderr}"
     )
     assert os.path.exists(os.path.join(outdir, "use_everything.cpp"))
+
+
+def test_member_function_template_callable(tmp_path):
+    """The full contract for member function templates: the generated pxd
+    compiles AND the method is callable with an explicit template argument
+    (``blob.at[int](0)``)."""
+    header = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "headers", "parity", "member_templates.h",
+    )
+    result = generate_pxd(
+        header, extern_from="member_templates.h", namespaces=["demo"]
+    )
+    outdir = str(tmp_path)
+    with open(os.path.join(outdir, "member_templates.pxd"), "w") as fh:
+        fh.write(result.text)
+    pyx = os.path.join(outdir, "use_mft.pyx")
+    with open(pyx, "w") as fh:
+        fh.write(
+            "from member_templates cimport Blob\n"
+            "def f():\n"
+            "    cdef Blob b\n"
+            "    cdef int x = b.at[int](0)\n"
+            "    return x + b.size()\n"
+        )
+    proc = subprocess.run(
+        [sys.executable, "-m", "cython", "--cplus", "-3", "-I", outdir, pyx],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"cython rejected member-function-template pxd:\n{proc.stderr}"
+    )

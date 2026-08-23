@@ -56,6 +56,9 @@ class Method:
     is_static: bool = False
     is_const: bool = False
     is_operator: bool = False
+    # Member function templates: parameter names, e.g. ["T"] for
+    # PCLPointCloud2-style ``T& at[T](...)``.
+    template_params: List[str] = field(default_factory=list)
 
 
 @dataclass

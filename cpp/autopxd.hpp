@@ -1013,6 +1013,7 @@ public:
                     body_t.find('[') != std::string::npos;
 
                 bool hasMemberTypedef = false;
+                bool hasMethod = false;
                 for(size_t j = i + 1; j < lines.size(); ++j)
                 {
                     if(lines[j].find_first_not_of(" \t") == std::string::npos)
@@ -1021,8 +1022,24 @@ public:
                         break;                          // dedent: body ended
                     std::string t = lines[j].substr(indentOf(lines[j]));
                     if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
+                    // A METHOD makes the struct C++-only too, and Cython
+                    // rejects a `const`-qualified method inside `cdef struct`
+                    // (`Ops operator+(...) nogil const`, silently broken
+                    // before). A function-pointer FIELD also carries parens —
+                    // `int (*cb)(int)` — so require the paren NOT be `(*`.
+                    // Comments, nested block headers and enum members don't
+                    // carry parens at all.
+                    while(!t.empty() && (t.back() == ' ' || t.back() == '\t'))
+                        t.pop_back();
+                    if(t.rfind("#", 0) != 0 && (t.empty() || t.back() != ':'))
+                    {
+                        size_t paren = t.find('(');
+                        if(paren != std::string::npos &&
+                           t.compare(paren, 2, "(*") != 0)
+                            hasMethod = true;
+                    }
                 }
-                if(hasMemberTypedef || isTemplateHeader)
+                if(hasMemberTypedef || isTemplateHeader || hasMethod)
                 {
                     lines[i] = std::string(p, ' ') + "cdef cppclass " +
                                body_t.substr(structKw.size());
@@ -2449,7 +2466,13 @@ private:
             std::cout << "\n";
 
             // construct
-            if(!isClassAccessPublic)
+            // Same gate as the member-function path: a STRUCT's members are
+            // public by default and isClassAccessPublic only turns true on an
+            // explicit access specifier, so the bare `!isClassAccessPublic`
+            // silently dropped every struct constructor (and with it the
+            // constructor-template skip/clear below, letting the captured
+            // template params leak into the next member).
+            if(!isClassAccessPublic && isClass)
             {
                 // public 以外の項目は pxd に書き出さない。
                 std::cout << "not public access constructor.";
@@ -2554,6 +2577,24 @@ private:
                 }
                 
                 constructorName += (*itr)->GetString();
+            }
+
+            // A constructor TEMPLATE is not declarable in Cython
+            // (`Wrap[U](const U&)` is a syntax error — compiler-verified), so
+            // skip it with a comment. This also consumes the proxy's captured
+            // parameter names: leaving them pending made the NEXT plain
+            // member emit a phantom template list (`int plain[U](int x)`),
+            // and previously leaked into following free functions too.
+            if(!pendingFunctionTemplateParams.empty())
+            {
+                pendingFunctionTemplateParams.clear();
+                // normalize the DECL text only — running the spacing passes
+                // over the whole comment rewrote the reason ("const ructor").
+                constructorTemplateDef += "# skipped: " +
+                    normalizeDeclSpacing(constructorName) +
+                    "  (constructor template not declarable in Cython)\n";
+                retStr = constructorTemplateDef;
+                return retStr;
             }
 
             constructorTemplateDef += constructorName;
@@ -2727,6 +2768,22 @@ private:
                     std::string tmpPunctuation = sb->GetString();
                     if(tmpPunctuation == "(")
                     {
+                        // A member function TEMPLATE spells `Ret name[T, ...]
+                        // (params)` in Cython, same as a free function
+                        // template; the function_template_t proxy captured the
+                        // parameter names, and this path never consumed them —
+                        // PCLPointCloud2's `template<typename T> T& at(...)`
+                        // emitted a bare, undefined `T`.
+                        if(!isPunctuation && !pendingFunctionTemplateParams.empty())
+                        {
+                            classFunctionName += "[";
+                            for(size_t pi = 0; pi < pendingFunctionTemplateParams.size(); ++pi)
+                            {
+                                if(pi) classFunctionName += ", ";
+                                classFunctionName += pendingFunctionTemplateParams[pi];
+                            }
+                            classFunctionName += "]";
+                        }
                         isPunctuation = true;
                     }
                     else if(tmpPunctuation == ")")
@@ -2765,6 +2822,9 @@ private:
 
                 classFunctionName += (*itr)->GetString();
             }
+
+            // 消費したテンプレート引数はクリアする（自由関数側と同じ規約）。
+            pendingFunctionTemplateParams.clear();
 
             classFunctionName += " nogil";
             // インデントを保護しつつ宣言本体の空白を整形する。
