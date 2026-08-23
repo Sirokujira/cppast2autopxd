@@ -353,6 +353,42 @@ below: cross-header names (1b) and member function templates (1c).
     Vertices, PCLPointCloud2, PolygonMesh) plus point_types generates a
     mutually-cimporting `[cython OK]` set; only types.h (template
     metaprogramming) remains out of scope.
+52. ~~that 8/9 sweep existed only as a hand-composed one-off: nothing in
+    the repo reproduced it, so it could regress unnoticed, and every
+    caller had to retype the same flags~~ → `--config <file>` reads the
+    repeatable options from a file (`key = value`, keys ARE the CLI names,
+    value verbatim after the first `=`, `#` comments and blank lines
+    ignored; entries APPEND to command-line ones). Unopenable file,
+    missing `=`, or unknown key each fail with a located message and exit
+    1 — never a silently ignored line. `tests/sweep_real_pcl.sh` then
+    turns the sweep into an artifact: it discovers PCL through `PCL_ROOT`
+    or the usual include roots, AUTO-SKIPS where there is none (exit 0)
+    and GATES where there is one, and `run_tests.sh` runs it — the C++
+    counterpart of the Python side's `tests/test_real_pcl.py`. Committed
+    config: `tests/configs/pcl_messages.conf`.
+    Fixing the sweep exposed one silent trap the CLI shared: a typemap
+    written `A = B` (rather than `A=B`) produced a FROM with a trailing
+    space, which can never match a word-boundary token, so the
+    substitution silently did nothing. FROM/TO are now trimmed, and an
+    empty FROM warns.
+    The pxd-reviewer then found seven defects in that new surface, all
+    fixed here: `--config <dir>` opened successfully on libstdc++ and read
+    zero lines, so every rule was silently dropped with exit 0 (badbit is
+    now checked — the exact claim "a typo is never a silently ignored
+    rule" had been false); a repeated `--config` kept only the last file
+    (the option is a vector now, like its siblings); a trailing `#` was
+    swallowed into the value, and an `extra_cimport` comment even reached
+    the generated pxd with cython accepting it (a `#` in a value is now a
+    located error); `run_tests.sh` guarded the sweep with `-x` while
+    invoking it through `bash`, so a checkout that drops the exec bit
+    removed the new gate with a green run (`-f`, plus a loud line when the
+    script is absent); a generation failure pointed at a log the EXIT trap
+    had already deleted (the tail is echoed instead); an unchecked
+    `mktemp -d` wrote generated files into the filesystem ROOT; and a set
+    but unusable `PCL_ROOT` fell through to the system glob, reporting a
+    green sweep for the wrong PCL (it is authoritative now — including the
+    include-root spelling `PCL_ROOT=/usr/include/pcl-1.12` — and a
+    mismatch exits 1).
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
