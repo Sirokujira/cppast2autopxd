@@ -335,6 +335,24 @@ below: cross-header names (1b) and member function templates (1c).
     Also from that review: #49's promotion legitimately converts
     coverage.h's `Defaults` (it carries `set_z(...)`) as well as
     pcl_message's `PCLMesh` — both stay `[cython OK]`.
+51. ~~cross-header names did not resolve (limitation 1b): a type declared
+    in a SIBLING header emitted bare and cython rejected it — the single
+    family behind five of the seven sweep failures~~ → two repeatable CLI
+    options mirroring the Python implementation's design: `--extra_cimport
+    "from PCLHeader cimport PCLHeader"` seeds the hoisted import list
+    (the cimport IS the statement of what the bare name means; wins the
+    by-symbol dedup), and `--typemap uindex_t=uint32_t` substitutes a
+    spelling word-boundary-wise across the final body BEFORE the
+    symbol-driven import passes, so the target picks up its own stdint
+    import automatically (a target needing another module pairs with
+    --extra_cimport). Gating fixtures live in tests/input_options/ with
+    their own run_tests.sh block (a cross-cimporting pxd PAIR must
+    compile); the plain fixture loop never sees them. With the options
+    composed, the real-PCL nine-header sweep goes **2/9 → 8/9**: every
+    message header (PCLHeader, PCLPointField, PCLImage, ModelCoefficients,
+    Vertices, PCLPointCloud2, PolygonMesh) plus point_types generates a
+    mutually-cimporting `[cython OK]` set; only types.h (template
+    metaprogramming) remains out of scope.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -367,15 +385,13 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    manual editing or a curated cimport map. (This is the only failure left in
    the fetched `status.h`; the committed `statuslike.h` covering the rest of
    that header passes.)
-1b. **Cross-header names do not resolve** — the tool has no name-resolution
-   layer, so a type declared in a SIBLING header emits by its bare name and
-   cython rejects it: `PCLHeader header` (PCLImage.h/ModelCoefficients.h/
-   PolygonMesh.h), `uindex_t`/`Indices` from pcl/types.h (PCLPointField.h/
-   Vertices.h). This is now the ONLY family failing in the nine-header
-   real-PCL sweep (plus types.h's template metaprogramming, out of scope).
-   The Python implementation solves it with known-name tracking plus
-   cimports/extra_cimports; the C++ counterpart needs the same design —
-   worth a dedicated pass with a multi-header or --extra-cimport mode.
+1b. ~~Cross-header names do not resolve~~ — closed by #51's
+   `--extra_cimport` / `--typemap`; the nine-header sweep is 8/9 with the
+   options composed. What remains open is convenience, not capability: the
+   flags are per-invocation, so a config-file driver (the pcl_headers.toml
+   role in python-pcl_skbuild's pipeline) would spare callers the
+   repetition. types.h itself stays out of scope (template
+   metaprogramming).
 1c. ~~Member FUNCTION templates lose their parameter list~~ — fixed by
    #48; PCLPointCloud2's `at` now emits `T& at[T](...)` and its only
    remaining sweep failures are family 1b names (PCLHeader, uindex_t).

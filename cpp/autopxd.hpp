@@ -92,6 +92,14 @@ private:
     // referred to unqualified (e.g. `Point`, not `demo::Point`).
     std::vector<std::string> currentNamespaceNames;
 
+    // --extra_cimport lines (verbatim `from X cimport Y`), seeded into the
+    // hoisted import list; --typemap FROM=TO word-boundary substitutions,
+    // applied to the final body before the symbol-driven import passes so a
+    // substitution target like uint32_t picks up its own import. Both mirror
+    // the Python implementation's extra_cimports / typemap.substitutions.
+    std::vector<std::string> extraCimports;
+    std::vector<std::string> typemapSubstitutions;
+
     // Template type-parameter names of the function template currently being
     // entered. cppast represents a free function template as a
     // function_template_t proxy wrapping the real function_t; the proxy carries
@@ -133,7 +141,10 @@ private:
 
 public:
     // AutoPxd(const std::string& filename, const std::string& output_folder = ".")
-    AutoPxd(const std::string& filename, const std::string& output_folder = ".", const std::string& xml_folder = "")
+    AutoPxd(const std::string& filename, const std::string& output_folder = ".", const std::string& xml_folder = "",
+            const std::vector<std::string>& extra_cimports = {},
+            const std::vector<std::string>& typemap_substitutions = {})
+        : extraCimports(extra_cimports), typemapSubstitutions(typemap_substitutions)
     {
         // そのまま設定すると、絶対パスになるため
         // 相対パスとして設定すること。
@@ -518,6 +529,19 @@ public:
         // lines, and emit them first followed by the remaining body.
         std::vector<std::string> importLines;
         std::vector<std::string> importedSymbols;
+        // --extra_cimport lines go in FIRST: the caller's statement of what a
+        // sibling-header name means (`from PCLHeader cimport PCLHeader`) wins
+        // the by-symbol dedup against anything the emitter derived.
+        for(const auto& imp : extraCimports)
+        {
+            std::string symbol = imp.substr(imp.find_last_of(' ') + 1);
+            if(std::find(importedSymbols.begin(), importedSymbols.end(), symbol)
+                   == importedSymbols.end())
+            {
+                importedSymbols.push_back(symbol);
+                importLines.push_back(imp);
+            }
+        }
         std::string rest;
         {
             std::string line;
@@ -1153,6 +1177,37 @@ public:
 
             rest.clear();
             for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
+        // --typemap FROM=TO substitutions: word-boundary textual replacement
+        // over the final body, the C++ counterpart of the Python typemap's
+        // substitutions (pcl_headers.toml). Runs BEFORE the symbol-driven
+        // import passes so a target like `uint32_t` gains its stdint import
+        // automatically; a target needing a different module (e.g.
+        // `vector[int]`) is paired with --extra_cimport by the caller.
+        for(const auto& sub : typemapSubstitutions)
+        {
+            size_t eq = sub.find('=');
+            if(eq == std::string::npos || eq == 0) continue;   // malformed: ignore
+            const std::string from = sub.substr(0, eq);
+            const std::string to = sub.substr(eq + 1);
+            std::string outBuf;
+            outBuf.reserve(rest.size());
+            size_t pos = 0;
+            while(pos < rest.size())
+            {
+                size_t hit = rest.find(from, pos);
+                if(hit == std::string::npos) { outBuf += rest.substr(pos); break; }
+                bool leftOk = hit == 0 ||
+                    (!std::isalnum((unsigned char)rest[hit - 1]) && rest[hit - 1] != '_');
+                size_t after = hit + from.size();
+                bool rightOk = after >= rest.size() ||
+                    (!std::isalnum((unsigned char)rest[after]) && rest[after] != '_');
+                outBuf += rest.substr(pos, hit - pos);
+                outBuf += (leftOk && rightOk) ? to : from;
+                pos = after;
+            }
+            rest = outBuf;
         }
 
         // Symbol-driven stdint imports: the include-directive mapping misses
