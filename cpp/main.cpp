@@ -215,6 +215,60 @@ parse_file(const cppast::libclang_compile_config& config, const cppast::diagnost
   return file;
 }
 
+// Read repeatable options from a config file so a caller with a fixed set of
+// cross-header rules (PCL's message headers need the same cimports and the
+// same uindex_t substitution on every invocation) states them once. Minimal
+// on purpose: the keys ARE the CLI option names and values are taken verbatim
+// after the first '=', so there is nothing to learn beyond the flags, and no
+// new dependency. Returns false (with a message) on an unopenable file, a
+// line without '=', or an unknown key — never silently ignores a line.
+static bool
+load_config_file(const std::string& path, std::vector<std::string>& extra_cimports,
+                 std::vector<std::string>& typemap_substitutions) {
+  std::ifstream in(path);
+  if (!in) {
+    print_error("cannot open config file '" + path + "'");
+    return false;
+  }
+  std::string line;
+  int lineno = 0;
+  while (std::getline(in, line)) {
+    lineno++;
+    // tolerate a CRLF config on any platform
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    auto begin = line.find_first_not_of(" \t");
+    if (begin == std::string::npos) continue;                 // blank
+    if (line[begin] == '#') continue;                         // comment
+    auto eq = line.find('=', begin);
+    if (eq == std::string::npos) {
+      print_error("config " + path + ":" + std::to_string(lineno) +
+                  ": expected `key = value`");
+      return false;
+    }
+    auto key_end = line.find_last_not_of(" \t", eq - 1);
+    std::string key = line.substr(begin, key_end - begin + 1);
+    auto val_begin = line.find_first_not_of(" \t", eq + 1);
+    std::string value =
+        val_begin == std::string::npos ? std::string() : line.substr(val_begin);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+      value.pop_back();
+
+    if (key == "extra_cimport")
+      extra_cimports.push_back(value);
+    else if (key == "typemap")
+      typemap_substitutions.push_back(value);
+    else {
+      // include paths and the standard belong on the command line: they feed
+      // the parse config, which is already built by the time this runs.
+      print_error("config " + path + ":" + std::to_string(lineno) +
+                  ": unknown key '" + key +
+                  "' (expected extra_cimport or typemap)");
+      return false;
+    }
+  }
+  return true;
+}
+
 int
 main(int argc, char* argv[]) try {
 #ifdef __APPLE__
@@ -271,7 +325,9 @@ main(int argc, char* argv[]) try {
         ("extra_cimport", "add a cimport line verbatim to the generated pxd (repeatable), e.g. \"from PCLHeader cimport PCLHeader\" — the counterpart of the Python implementation's extra_cimports for names declared in sibling headers",
          cxxopts::value<std::vector<std::string>>())
         ("typemap", "substitute a type name in the generated pxd, FROM=TO with word-boundary matching (repeatable), e.g. \"uindex_t=uint32_t\" — the counterpart of the Python implementation's typemap substitutions",
-         cxxopts::value<std::vector<std::string>>());
+         cxxopts::value<std::vector<std::string>>())
+        ("config", "read repeatable options from a file: lines of `key = value` where key is extra_cimport or typemap (blank lines and #-comments ignored; the value is taken verbatim after the first '='). Entries APPEND to any given on the command line",
+         cxxopts::value<std::string>());
   // clang-format on
   option_list.parse_positional("file");
 
@@ -376,6 +432,11 @@ main(int argc, char* argv[]) try {
     std::vector<std::string> typemap_substitutions;
     if (options.count("typemap"))
       typemap_substitutions = options["typemap"].as<std::vector<std::string>>();
+    // config-file entries APPEND to command-line ones (never replace them)
+    if (options.count("config") &&
+        !load_config_file(options["config"].as<std::string>(), extra_cimports,
+                          typemap_substitutions))
+      return 1;
 
     // autopxd = new AutoPxd(file->name());
     autopxd = new AutoPxd(file->name(), output_dir, xml_dir,

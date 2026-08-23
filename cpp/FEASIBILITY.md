@@ -353,6 +353,24 @@ below: cross-header names (1b) and member function templates (1c).
     Vertices, PCLPointCloud2, PolygonMesh) plus point_types generates a
     mutually-cimporting `[cython OK]` set; only types.h (template
     metaprogramming) remains out of scope.
+52. ~~that 8/9 sweep existed only as a hand-composed one-off: nothing in
+    the repo reproduced it, so it could regress unnoticed, and every
+    caller had to retype the same flags~~ → `--config <file>` reads the
+    repeatable options from a file (`key = value`, keys ARE the CLI names,
+    value verbatim after the first `=`, `#` comments and blank lines
+    ignored; entries APPEND to command-line ones). Unopenable file,
+    missing `=`, or unknown key each fail with a located message and exit
+    1 — never a silently ignored line. `tests/sweep_real_pcl.sh` then
+    turns the sweep into an artifact: it discovers PCL through `PCL_ROOT`
+    or the usual include roots, AUTO-SKIPS where there is none (exit 0)
+    and GATES where there is one, and `run_tests.sh` runs it — the C++
+    counterpart of the Python side's `tests/test_real_pcl.py`. Committed
+    config: `tests/configs/pcl_messages.conf`.
+    Fixing the sweep exposed one silent trap the CLI shared: a typemap
+    written `A = B` (rather than `A=B`) produced a FROM with a trailing
+    space, which can never match a word-boundary token, so the
+    substitution silently did nothing. FROM/TO are now trimmed, and an
+    empty FROM warns.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 

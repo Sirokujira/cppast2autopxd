@@ -1195,8 +1195,24 @@ public:
                           << "' (expected FROM=TO)\n";
                 continue;
             }
-            const std::string from = sub.substr(0, eq);
-            const std::string to = sub.substr(eq + 1);
+            // Trim around FROM/TO: a caller (or a config line) writing
+            // `A = B` instead of `A=B` otherwise got a FROM with a trailing
+            // space, which can never match a word-boundary token — the
+            // substitution silently did nothing.
+            auto trim = [](std::string v) {
+                size_t b = v.find_first_not_of(" \t");
+                if(b == std::string::npos) return std::string();
+                size_t e = v.find_last_not_of(" \t");
+                return v.substr(b, e - b + 1);
+            };
+            const std::string from = trim(sub.substr(0, eq));
+            const std::string to = trim(sub.substr(eq + 1));
+            if(from.empty())
+            {
+                std::cerr << "warning: ignoring --typemap '" << sub
+                          << "' (empty FROM)\n";
+                continue;
+            }
             std::string outBuf;
             outBuf.reserve(rest.size());
             size_t pos = 0;

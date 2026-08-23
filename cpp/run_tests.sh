@@ -78,7 +78,7 @@ if [[ -d "$OPT_IN" ]]; then
   if "$TOOL" --output_dir "$OUT" --xml_dir "" --std "$STD" "$OPT_IN/cross_base.h" >"$OUT/cross_base.log" 2>&1 \
      && "$TOOL" --output_dir "$OUT" --xml_dir "" --std "$STD" \
           --extra_cimport "from cross_base cimport Vec3" \
-          --typemap "myindex_t=uint32_t" \
+          --config "$ROOT/tests/configs/cross_ref.conf" \
           "$OPT_IN/cross_ref.h" >"$OUT/cross_ref.log" 2>&1; then
     if [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
       # same availability guard as cython_check: without a cython binary the
@@ -101,6 +101,11 @@ if [[ -d "$OPT_IN" ]]; then
     printf 'NG    %-24s generation failed\n' "$name"
     status=1
   fi
+fi
+
+# --- real-PCL sweep (auto-skips without a PCL install; gates with one) -----
+if [[ -x "$ROOT/tests/sweep_real_pcl.sh" ]]; then
+  if bash "$ROOT/tests/sweep_real_pcl.sh"; then :; else status=1; fi
 fi
 
 exit $status
