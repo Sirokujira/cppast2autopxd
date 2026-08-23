@@ -66,4 +66,35 @@ for hdr in "$ROOT"/tests/input/*.h "$ROOT"/tests/input/**/*.h; do
     printf 'FAIL  %-28s  (tool exit!=0; see %s)\n' "$name" "$log"; [[ $gating -eq 1 ]] && status=1
   fi
 done
+
+# --- options block (gating): --extra_cimport / --typemap composition -------
+# cross_base.h generates plainly; cross_ref.h needs Vec3 cimported from that
+# pxd and the sibling-header alias myindex_t substituted away — the same
+# shape as PCL's message headers (PCLHeader/uindex_t). The pair must
+# compile together under cython.
+OPT_IN="$ROOT/tests/input_options"
+if [[ -d "$OPT_IN" ]]; then
+  name="options"
+  if "$TOOL" --output_dir "$OUT" --xml_dir "" --std "$STD" "$OPT_IN/cross_base.h" >"$OUT/cross_base.log" 2>&1 \
+     && "$TOOL" --output_dir "$OUT" --xml_dir "" --std "$STD" \
+          --extra_cimport "from cross_base cimport Vec3" \
+          --typemap "myindex_t=uint32_t" \
+          "$OPT_IN/cross_ref.h" >"$OUT/cross_ref.log" 2>&1; then
+    tmp="$(mktemp -d)"
+    cp "$OUT/cross_base.pxd" "$OUT/cross_ref.pxd" "$tmp/"
+    printf 'cimport cross_ref\n' > "$tmp/use_cross.pyx"
+    if ( cd "$tmp" && "$CYTHON" --cplus use_cross.pyx ) >"$tmp/err" 2>&1; then
+      printf 'OK    %-24s cross-cimport pair  [cython OK]\n' "$name"
+    else
+      cp "$tmp/err" "$OUT/$name.cython.log"
+      printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$OUT/$name.cython.log"
+      status=1
+    fi
+    rm -rf "$tmp"
+  else
+    printf 'NG    %-24s generation failed\n' "$name"
+    status=1
+  fi
+fi
+
 exit $status
