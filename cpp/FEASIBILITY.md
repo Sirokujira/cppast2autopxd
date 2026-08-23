@@ -371,6 +371,24 @@ below: cross-header names (1b) and member function templates (1c).
     space, which can never match a word-boundary token, so the
     substitution silently did nothing. FROM/TO are now trimmed, and an
     empty FROM warns.
+    The pxd-reviewer then found seven defects in that new surface, all
+    fixed here: `--config <dir>` opened successfully on libstdc++ and read
+    zero lines, so every rule was silently dropped with exit 0 (badbit is
+    now checked — the exact claim "a typo is never a silently ignored
+    rule" had been false); a repeated `--config` kept only the last file
+    (the option is a vector now, like its siblings); a trailing `#` was
+    swallowed into the value, and an `extra_cimport` comment even reached
+    the generated pxd with cython accepting it (a `#` in a value is now a
+    located error); `run_tests.sh` guarded the sweep with `-x` while
+    invoking it through `bash`, so a checkout that drops the exec bit
+    removed the new gate with a green run (`-f`, plus a loud line when the
+    script is absent); a generation failure pointed at a log the EXIT trap
+    had already deleted (the tail is echoed instead); an unchecked
+    `mktemp -d` wrote generated files into the filesystem ROOT; and a set
+    but unusable `PCL_ROOT` fell through to the system glob, reporting a
+    green sweep for the wrong PCL (it is authoritative now — including the
+    include-root spelling `PCL_ROOT=/usr/include/pcl-1.12` — and a
+    mismatch exits 1).
 
 ### Compilation-database mode (real PCL, verified on Linux)
 

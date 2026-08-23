@@ -15,12 +15,17 @@ STD="${STD:-c++14}"
 
 # PCL discovery: PCL_ROOT wins, else the first pcl-*/pcl/PCLHeader.h under
 # the usual include roots. Never hard-code a path.
+# A SET PCL_ROOT is authoritative: if none of its accepted layouts holds, fail
+# instead of falling through to the system glob — otherwise sweeping a second
+# PCL (PCL_ROOT=/usr/include/pcl-1.12) silently reports on the system one.
 find_pcl() {
-  if [[ -n "${PCL_ROOT:-}" && -f "$PCL_ROOT/include/pcl/PCLHeader.h" ]]; then
-    echo "$PCL_ROOT/include"; return 0
-  fi
-  if [[ -n "${PCL_ROOT:-}" && -f "$PCL_ROOT/PCLHeader.h" ]]; then
-    echo "${PCL_ROOT%/pcl}"; return 0
+  if [[ -n "${PCL_ROOT:-}" ]]; then
+    if   [[ -f "$PCL_ROOT/include/pcl/PCLHeader.h" ]]; then echo "$PCL_ROOT/include"; return 0
+    elif [[ -f "$PCL_ROOT/pcl/PCLHeader.h"         ]]; then echo "$PCL_ROOT";         return 0
+    elif [[ -f "$PCL_ROOT/PCLHeader.h"             ]]; then echo "${PCL_ROOT%/pcl}";  return 0
+    fi
+    echo "sweep: PCL_ROOT='$PCL_ROOT' has no pcl/PCLHeader.h under it" >&2
+    return 2
   fi
   local d
   for d in /usr/include/pcl-* /usr/local/include/pcl-* /opt/homebrew/include/pcl-*; do
@@ -36,12 +41,20 @@ find_eigen() {
   return 1
 }
 
-PCL_INC="$(find_pcl)" || { echo "sweep: no PCL install found - skipped"; exit 0; }
+# capture the status explicitly: inside `if ! cmd; then`, $? is the negation's
+# status (always 0), so the 2-vs-1 distinction below would be lost.
+PCL_INC="$(find_pcl)"; pcl_rc=$?
+if [[ $pcl_rc -ne 0 ]]; then
+  # 2 = PCL_ROOT was set but unusable (a configuration error, not an absence)
+  [[ $pcl_rc -eq 2 ]] && exit 1
+  echo "sweep: no PCL install found - skipped"; exit 0
+fi
 [[ -x "$TOOL" ]] || { echo "sweep: build the tool first (./bootstrap.sh)" >&2; exit 1; }
 EIGEN_INC="$(find_eigen || true)"
 CYTHON="${CYTHON:-$(command -v cython || true)}"
 
-OUT="$(mktemp -d)"
+OUT="$(mktemp -d)" || { echo "sweep: mktemp -d failed" >&2; exit 1; }
+[[ -n "$OUT" && -d "$OUT" ]] || { echo "sweep: no temp dir" >&2; exit 1; }
 trap 'rm -rf "$OUT"' EXIT
 INC=(-I "$PCL_INC")
 [[ -n "$EIGEN_INC" ]] && INC+=(-I "$EIGEN_INC")
@@ -79,7 +92,10 @@ for entry in "${ENTRIES[@]}"; do
   fi
 
   if ! "$TOOL" "${args[@]}" "$PCL_INC/pcl/$name.h" >"$OUT/$name.log" 2>&1; then
-    printf 'NG    %-20s generation failed (see %s)\n' "$name" "$OUT/$name.log"
+    # echo the tail rather than pointing at a path the EXIT trap deletes;
+    # later headers cimport this one, so name the root cause loudly.
+    printf 'NG    %-20s generation failed:\n' "$name"
+    tail -n 8 "$OUT/$name.log" >&2
     status=1; continue
   fi
   if [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then

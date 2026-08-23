@@ -253,6 +253,16 @@ load_config_file(const std::string& path, std::vector<std::string>& extra_cimpor
     while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
       value.pop_back();
 
+    // '#' starts a comment at line start, so a caller will reasonably expect
+    // a TRAILING comment to work too — but the value is taken verbatim, so it
+    // would be swallowed into the rule (an extra_cimport comment even reached
+    // the generated pxd, and cython accepted it). Reject rather than guess.
+    if (value.find('#') != std::string::npos) {
+      print_error("config " + path + ":" + std::to_string(lineno) +
+                  ": '#' in a value (comments must be on their own line)");
+      return false;
+    }
+
     if (key == "extra_cimport")
       extra_cimports.push_back(value);
     else if (key == "typemap")
@@ -265,6 +275,13 @@ load_config_file(const std::string& path, std::vector<std::string>& extra_cimpor
                   "' (expected extra_cimport or typemap)");
       return false;
     }
+  }
+  // Opening a DIRECTORY succeeds on libstdc++ and the first getline simply
+  // fails, which used to look like an empty config: every rule silently
+  // dropped, exit 0. badbit distinguishes it from a genuinely empty file.
+  if (in.bad()) {
+    print_error("cannot read config file '" + path + "' (is it a directory?)");
+    return false;
   }
   return true;
 }
@@ -326,8 +343,8 @@ main(int argc, char* argv[]) try {
          cxxopts::value<std::vector<std::string>>())
         ("typemap", "substitute a type name in the generated pxd, FROM=TO with word-boundary matching (repeatable), e.g. \"uindex_t=uint32_t\" — the counterpart of the Python implementation's typemap substitutions",
          cxxopts::value<std::vector<std::string>>())
-        ("config", "read repeatable options from a file: lines of `key = value` where key is extra_cimport or typemap (blank lines and #-comments ignored; the value is taken verbatim after the first '='). Entries APPEND to any given on the command line",
-         cxxopts::value<std::string>());
+        ("config", "read repeatable options from a file: lines of `key = value` where key is extra_cimport or typemap (blank lines and whole-line #-comments ignored; a '#' inside a value is an error, since it is the comment marker). Repeatable; entries APPEND to any given on the command line",
+         cxxopts::value<std::vector<std::string>>());
   // clang-format on
   option_list.parse_positional("file");
 
@@ -433,10 +450,10 @@ main(int argc, char* argv[]) try {
     if (options.count("typemap"))
       typemap_substitutions = options["typemap"].as<std::vector<std::string>>();
     // config-file entries APPEND to command-line ones (never replace them)
-    if (options.count("config") &&
-        !load_config_file(options["config"].as<std::string>(), extra_cimports,
-                          typemap_substitutions))
-      return 1;
+    if (options.count("config"))
+      for (auto& conf : options["config"].as<std::vector<std::string>>())
+        if (!load_config_file(conf, extra_cimports, typemap_substitutions))
+          return 1;
 
     // autopxd = new AutoPxd(file->name());
     autopxd = new AutoPxd(file->name(), output_dir, xml_dir,

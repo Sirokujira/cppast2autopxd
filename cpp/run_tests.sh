@@ -104,8 +104,14 @@ if [[ -d "$OPT_IN" ]]; then
 fi
 
 # --- real-PCL sweep (auto-skips without a PCL install; gates with one) -----
-if [[ -x "$ROOT/tests/sweep_real_pcl.sh" ]]; then
+# -f, not -x: the script is invoked through `bash`, so a checkout that drops
+# the exec bit (Windows, zip export, core.fileMode=false) must not silently
+# remove the gate. Say so if it is missing at all.
+if [[ -f "$ROOT/tests/sweep_real_pcl.sh" ]]; then
   if bash "$ROOT/tests/sweep_real_pcl.sh"; then :; else status=1; fi
+else
+  printf 'NG    %-24s tests/sweep_real_pcl.sh missing\n' "sweep"
+  status=1
 fi
 
 exit $status
