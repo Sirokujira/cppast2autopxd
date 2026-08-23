@@ -33,12 +33,13 @@ draco). This records what works today, the environment, and the gaps.
 
 ## Verified results (`./run_tests.sh`)
 
-All eleven committed fixtures generate AND pass Cython validation (a `cython`
+All twelve committed fixtures generate AND pass Cython validation (a `cython`
 binary on `PATH`, or `CYTHON=/path`, enables the `[cython OK]` check):
 
 ```
 OK    c_api                          708 bytes  (21 AST visits)  [cython OK]
 OK    coverage                      1343 bytes  (66 AST visits)  [cython OK]
+OK    member_templates               279 bytes  (18 AST visits)  [cython OK]
 OK    pcl_header                     469 bytes  (16 AST visits)  [cython OK]
 OK    pcl_message                    798 bytes  (35 AST visits)  [cython OK]
 OK    pcl_point_cloud                939 bytes  (32 AST visits)  [cython OK]
@@ -301,6 +302,22 @@ below: cross-header names (1b) and member function templates (1c).
     `container_start` re-arms at every namespace boundary so siblings
     after a nested namespace open a fresh correctly-qualified block, and
     namespace exits no longer touch the indent.
+48. ~~member FUNCTION templates emitted without their parameter list
+    (`template <typename T> T& at(...)` in PCLPointCloud2 became a bare,
+    undefined `T`)~~ → the function_template_t proxy already captured the
+    parameter names for FREE functions; the member-function token loop now
+    consumes them the same way, emitting `T& at[T](size_t i)` — verified
+    declarable AND callable (`blob.at[int](0)`) with the real cython
+    compiler. The Python implementation used to warn-skip these on a
+    "not declarable in Cython pxd" claim the same probe disproves, so it
+    now lowers them too (`ir.Method.template_params`); packs and template
+    template parameters still warn-skip.
+49. ~~a struct whose only C++-ness is its METHODS stayed `cdef struct`,
+    where Cython rejects a `const`-qualified method — emitted silently
+    broken (`Ops operator+(...) nogil const`)~~ → the #34 promotion also
+    triggers on a method-like body line (parens, not `(*` — function
+    pointer fields stay fields), matching the Python implementation's
+    cppclass output for the same header. Fixture: member_templates.h.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -342,16 +359,11 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    The Python implementation solves it with known-name tracking plus
    cimports/extra_cimports; the C++ counterpart needs the same design —
    worth a dedicated pass with a multi-header or --extra-cimport mode.
-1c. **Member FUNCTION templates lose their parameter list** —
-   `template <typename T> T& at(...)` inside PCLPointCloud2 emits a bare
-   `T& at(...)` with no `[T]`, so `T` is undefined (class templates and
-   FREE function templates emit correctly). Pre-existing; second family
-   failing the real-PCL sweep.
-1d. **A `const` method on an UNPROMOTED `cdef struct` emits invalid text
-   silently** — `Ops operator+(...) nogil const` inside `cdef struct` is
-   rejected by cython with no `# skipped:` comment (the same construct
-   inside a promoted cppclass is fine). Found by the pxd-reviewer probing
-   #45; pre-existing, needs its own fixture + fix.
+1c. ~~Member FUNCTION templates lose their parameter list~~ — fixed by
+   #48; PCLPointCloud2's `at` now emits `T& at[T](...)` and its only
+   remaining sweep failures are family 1b names (PCLHeader, uindex_t).
+1d. ~~A `const` method on an UNPROMOTED `cdef struct` emits invalid text
+   silently~~ — fixed by #49 (method-bearing structs promote).
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse

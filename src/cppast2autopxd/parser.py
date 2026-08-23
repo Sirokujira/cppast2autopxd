@@ -587,10 +587,9 @@ class _Lowering:
                         if ctor is not None:
                             cls.constructors.append(ctor)
                     elif kind == CursorKind.FUNCTION_TEMPLATE:
-                        raise _SkipEntity(
-                            f"member function template {child.spelling!r} "
-                            "(not declarable in Cython pxd)"
-                        )
+                        method = self._lower_method_template(child)
+                        if method is not None:
+                            cls.methods.append(method)
                     elif kind == CursorKind.VAR_DECL:
                         raise _SkipEntity(
                             f"static data member {child.spelling!r} (declare "
@@ -753,8 +752,10 @@ class _Lowering:
             params=self._lower_params(cursor),
         )
 
-    def _lower_function_template(self, cursor) -> ir.Function:
-        """Free function templates: ``T clamp[T](T v, T lo, T hi)``."""
+    def _function_template_params(self, cursor):
+        """Collect template parameter names (with ``=*`` for defaults) and
+        the scope set for a FUNCTION_TEMPLATE cursor; raises _SkipEntity for
+        the shapes Cython cannot declare (packs, template template params)."""
         tparams: List[str] = []
         scope: Set[str] = set()
         for child in cursor.get_children():
@@ -778,12 +779,49 @@ class _Lowering:
                     f"function template {cursor.spelling!r} uses a template "
                     "template parameter (not declarable in Cython)"
                 )
+        return tparams, scope
+
+    def _lower_function_template(self, cursor) -> ir.Function:
+        """Free function templates: ``T clamp[T](T v, T lo, T hi)``."""
+        tparams, scope = self._function_template_params(cursor)
         self.mapper.push_scope(scope)
         try:
             return ir.Function(
                 name=cursor.spelling,
                 return_type=self._type(cursor.result_type),
                 params=self._lower_params(cursor),
+                template_params=tparams,
+            )
+        finally:
+            self.mapper.pop_scope()
+
+    def _lower_method_template(self, cursor) -> ir.Method:
+        """Member function templates: ``T& at[T](size_t i)`` — declarable
+        AND callable (``blob.at[int](0)``), verified against the real cython
+        compiler; the earlier skip claimed otherwise."""
+        name = cursor.spelling
+        if name.startswith("operator"):
+            raise _SkipEntity(
+                f"operator template {name!r} (not declarable in Cython)"
+            )
+        tparams, scope = self._function_template_params(cursor)
+        # libclang's CXXMethod predicates return False on a FUNCTION_TEMPLATE
+        # cursor, so read constness from the declaration tokens: a `const`
+        # after the LAST closing paren is the method qualifier.
+        tokens = [t.spelling for t in cursor.get_tokens()]
+        last_paren = max(
+            (i for i, t in enumerate(tokens) if t == ")"), default=-1
+        )
+        is_const = last_paren >= 0 and "const" in tokens[last_paren + 1:]
+        self.mapper.push_scope(scope)
+        try:
+            return ir.Method(
+                name=name,
+                return_type=self._type(cursor.result_type),
+                params=self._lower_params(cursor),
+                is_static=False,
+                is_const=is_const,
+                is_operator=False,
                 template_params=tparams,
             )
         finally:

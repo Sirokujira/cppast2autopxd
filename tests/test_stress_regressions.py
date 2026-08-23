@@ -120,7 +120,11 @@ def test_unqualified_shared_ptr_alias(tmp_path):
     assert ok, err
 
 
-def test_member_function_template_warns(tmp_path):
+def test_member_function_template_emitted(tmp_path):
+    """Member function templates ARE declarable and callable in Cython
+    (``host.convert[int]()``) — verified against the real cython compiler,
+    overturning the earlier skip whose reason claimed otherwise. Packs and
+    template template parameters still warn-skip via the shared guard."""
     (tmp_path / "mft.hpp").write_text(textwrap.dedent("""\
         #pragma once
         namespace demo {
@@ -128,6 +132,7 @@ def test_member_function_template_warns(tmp_path):
         public:
             Host();
             template <typename T> T convert() const;
+            template <typename... Ts> void absorb(Ts... vs);
             int plain() const;
         };
         }
@@ -135,9 +140,11 @@ def test_member_function_template_warns(tmp_path):
     result = generate_pxd(
         str(tmp_path / "mft.hpp"), extern_from="mft.hpp", namespaces=["demo"]
     )
-    assert "convert" not in result.text
+    assert "T convert[T]() except +" in result.text
     assert "int plain() except +" in result.text
-    assert any("member function template" in w for w in result.warnings)
+    # the variadic member template still warn-skips
+    assert "absorb" not in result.text
+    assert any("parameter packs" in w for w in result.warnings)
 
 
 def test_function_pointer_member_typedef_supported(tmp_path):

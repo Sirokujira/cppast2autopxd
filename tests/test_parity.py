@@ -264,3 +264,26 @@ def test_pcl_message(tmp_path):
         "from pcl_message cimport PCLField, PCLMesh, PCLFieldPtr\n"
         "def f():\n    cdef PCLFieldPtr p\n    return p.use_count()\n",
     )
+
+
+def test_member_templates(tmp_path):
+    result = generate_pxd(
+        os.path.join(PARITY, "member_templates.h"),
+        extern_from="member_templates.h",
+        namespaces=["demo"],
+    )
+    text = result.text
+    # member function templates carry their parameter list (the C++ tool
+    # emitted a bare undefined `T`; the Python impl used to warn-skip them
+    # on a since-disproven "not declarable" claim)
+    assert "T& at[T](size_t i)" in text
+    assert "const T& view[T](size_t i) except +" in text
+    # a struct whose C++-ness is its methods promotes to cppclass, so the
+    # const qualifier stays expressible
+    assert "cdef cppclass Ops:" in text
+    assert "Ops operator+(const Ops& rhs) except +" in text
+    _cython_ok(
+        tmp_path, "member_templates", text,
+        "from member_templates cimport Blob\n"
+        "def f():\n    cdef Blob b\n    return b.at[int](0)\n",
+    )

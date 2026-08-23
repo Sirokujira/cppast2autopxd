@@ -153,7 +153,10 @@ def _emit_class(cls: ir.Class, options: EmitOptions, indent: int) -> List[str]:
     for f in cls.fields:
         body.append(body_pad + _field_decl(f))
     for m in cls.methods:
-        for sig in _signatures(m.return_type, m.name, m.params, options,
+        name = m.name
+        if m.template_params:
+            name += "[" + ", ".join(m.template_params) + "]"
+        for sig in _signatures(m.return_type, name, m.params, options,
                                is_const=m.is_const):
             if m.is_static:
                 body.append(f"{body_pad}@staticmethod")
