@@ -282,6 +282,13 @@ def test_member_templates(tmp_path):
     # const qualifier stays expressible
     assert "cdef cppclass Ops:" in text
     assert "Ops operator+(const Ops& rhs) except +" in text
+    # a constructor TEMPLATE is not declarable (`Wrap[U](...)` is a cython
+    # syntax error) — it warn-skips, the plain ctor and the FOLLOWING method
+    # stay clean (no phantom `[U]` inherited from the ctor's params)
+    assert "Wrap() except +" in text
+    assert "int plain(int x) except +" in text
+    assert "plain[U]" not in text and "Wrap[U]" not in text
+    assert any("constructor template" in w for w in result.warnings)
     _cython_ok(
         tmp_path, "member_templates", text,
         "from member_templates cimport Blob\n"

@@ -804,6 +804,15 @@ class _Lowering:
             raise _SkipEntity(
                 f"operator template {name!r} (not declarable in Cython)"
             )
+        parent = cursor.semantic_parent
+        if parent is not None and name == parent.spelling:
+            # A constructor template is also a FUNCTION_TEMPLATE cursor;
+            # `Wrap[U](const U&)` is a cython syntax error (compiler-verified),
+            # and lowering it as a method emitted a nonexistent
+            # `void Wrap(...)` silently.
+            raise _SkipEntity(
+                f"constructor template {name!r} (not declarable in Cython)"
+            )
         tparams, scope = self._function_template_params(cursor)
         # libclang's CXXMethod predicates return False on a FUNCTION_TEMPLATE
         # cursor, so read constness from the declaration tokens: a `const`

@@ -21,4 +21,10 @@ struct Ops {
     Ops operator+(const Ops& rhs) const;
 };
 
+struct Wrap {
+    Wrap();
+    template <typename U> Wrap(const U& other);
+    int plain(int x);
+};
+
 }  // namespace demo

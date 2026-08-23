@@ -37,18 +37,18 @@ All twelve committed fixtures generate AND pass Cython validation (a `cython`
 binary on `PATH`, or `CYTHON=/path`, enables the `[cython OK]` check):
 
 ```
-OK    c_api                          708 bytes  (21 AST visits)  [cython OK]
-OK    coverage                      1343 bytes  (66 AST visits)  [cython OK]
-OK    member_templates               279 bytes  (18 AST visits)  [cython OK]
-OK    pcl_header                     469 bytes  (16 AST visits)  [cython OK]
-OK    pcl_message                    798 bytes  (35 AST visits)  [cython OK]
-OK    pcl_point_cloud                939 bytes  (32 AST visits)  [cython OK]
-OK    pcl_point_types               1192 bytes  (115 AST visits)  [cython OK]
-OK    simple                         824 bytes  (33 AST visits)  [cython OK]
-OK    smart_returns                  805 bytes  (29 AST visits)  [cython OK]
-OK    statuslike                     621 bytes  (25 AST visits)  [cython OK]
-OK    templates                      705 bytes  (34 AST visits)  [cython OK]
-OK    vectord                        821 bytes  (23 AST visits)  [cython OK]
+OK    c_api                           708 bytes  (21 AST visits)  [cython OK]
+OK    coverage                       1345 bytes  (66 AST visits)  [cython OK]
+OK    member_templates                438 bytes  (25 AST visits)  [cython OK]
+OK    pcl_header                      469 bytes  (16 AST visits)  [cython OK]
+OK    pcl_message                     800 bytes  (35 AST visits)  [cython OK]
+OK    pcl_point_cloud                 939 bytes  (32 AST visits)  [cython OK]
+OK    pcl_point_types                1192 bytes  (115 AST visits)  [cython OK]
+OK    simple                          824 bytes  (33 AST visits)  [cython OK]
+OK    smart_returns                   805 bytes  (29 AST visits)  [cython OK]
+OK    statuslike                      621 bytes  (25 AST visits)  [cython OK]
+OK    templates                       705 bytes  (34 AST visits)  [cython OK]
+OK    vectord                         821 bytes  (23 AST visits)  [cython OK]
 ```
 
 (`tests/input/draco/status.h`, a fetched/gitignored real header, is generated
@@ -318,6 +318,23 @@ below: cross-header names (1b) and member function templates (1c).
     triggers on a method-like body line (parens, not `(*` — function
     pointer fields stay fields), matching the Python implementation's
     cppclass output for the same header. Fixture: member_templates.h.
+50. ~~constructor templates broke both implementations differently after
+    #48: the C++ proxy's captured parameter names were never consumed by
+    the constructor path, so the NEXT plain member emitted a phantom list
+    (`int plain[U](int x)`); the Python lowering emitted a nonexistent
+    `void Wrap[U](...)` method silently~~ → `Wrap[U](const U&)` is a
+    cython syntax error (compiler-verified), so both sides now skip with
+    a record — `# skipped: ... (constructor template not declarable in
+    Cython)` / a parser warning — and the C++ side clears the pending
+    params (also curing a pre-existing leak into following free
+    functions). Found by the pxd-reviewer. En route: the constructor
+    access gate said `!isClassAccessPublic` where the method path says
+    `!isClassAccessPublic && isClass`, so every STRUCT constructor was
+    silently dropped (structs are public by default and the flag only
+    turns true on an explicit access specifier) — struct ctors now emit.
+    Also from that review: #49's promotion legitimately converts
+    coverage.h's `Defaults` (it carries `set_z(...)`) as well as
+    pcl_message's `PCLMesh` — both stay `[cython OK]`.
 
 ### Compilation-database mode (real PCL, verified on Linux)
 

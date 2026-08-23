@@ -2466,7 +2466,13 @@ private:
             std::cout << "\n";
 
             // construct
-            if(!isClassAccessPublic)
+            // Same gate as the member-function path: a STRUCT's members are
+            // public by default and isClassAccessPublic only turns true on an
+            // explicit access specifier, so the bare `!isClassAccessPublic`
+            // silently dropped every struct constructor (and with it the
+            // constructor-template skip/clear below, letting the captured
+            // template params leak into the next member).
+            if(!isClassAccessPublic && isClass)
             {
                 // public 以外の項目は pxd に書き出さない。
                 std::cout << "not public access constructor.";
@@ -2571,6 +2577,24 @@ private:
                 }
                 
                 constructorName += (*itr)->GetString();
+            }
+
+            // A constructor TEMPLATE is not declarable in Cython
+            // (`Wrap[U](const U&)` is a syntax error — compiler-verified), so
+            // skip it with a comment. This also consumes the proxy's captured
+            // parameter names: leaving them pending made the NEXT plain
+            // member emit a phantom template list (`int plain[U](int x)`),
+            // and previously leaked into following free functions too.
+            if(!pendingFunctionTemplateParams.empty())
+            {
+                pendingFunctionTemplateParams.clear();
+                // normalize the DECL text only — running the spacing passes
+                // over the whole comment rewrote the reason ("const ructor").
+                constructorTemplateDef += "# skipped: " +
+                    normalizeDeclSpacing(constructorName) +
+                    "  (constructor template not declarable in Cython)\n";
+                retStr = constructorTemplateDef;
+                return retStr;
             }
 
             constructorTemplateDef += constructorName;
