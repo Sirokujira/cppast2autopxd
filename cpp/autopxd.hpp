@@ -1188,7 +1188,13 @@ public:
         for(const auto& sub : typemapSubstitutions)
         {
             size_t eq = sub.find('=');
-            if(eq == std::string::npos || eq == 0) continue;   // malformed: ignore
+            if(eq == std::string::npos || eq == 0)
+            {
+                // never silent: a typo'd flag should be attributable.
+                std::cerr << "warning: ignoring malformed --typemap '" << sub
+                          << "' (expected FROM=TO)\n";
+                continue;
+            }
             const std::string from = sub.substr(0, eq);
             const std::string to = sub.substr(eq + 1);
             std::string outBuf;

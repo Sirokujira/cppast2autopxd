@@ -80,17 +80,23 @@ if [[ -d "$OPT_IN" ]]; then
           --extra_cimport "from cross_base cimport Vec3" \
           --typemap "myindex_t=uint32_t" \
           "$OPT_IN/cross_ref.h" >"$OUT/cross_ref.log" 2>&1; then
-    tmp="$(mktemp -d)"
-    cp "$OUT/cross_base.pxd" "$OUT/cross_ref.pxd" "$tmp/"
-    printf 'cimport cross_ref\n' > "$tmp/use_cross.pyx"
-    if ( cd "$tmp" && "$CYTHON" --cplus use_cross.pyx ) >"$tmp/err" 2>&1; then
-      printf 'OK    %-24s cross-cimport pair  [cython OK]\n' "$name"
+    if [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
+      # same availability guard as cython_check: without a cython binary the
+      # generation-only gate must stay green, not fail on this block.
+      tmp="$(mktemp -d)"
+      cp "$OUT/cross_base.pxd" "$OUT/cross_ref.pxd" "$tmp/"
+      printf 'cimport cross_ref\n' > "$tmp/use_cross.pyx"
+      if ( cd "$tmp" && "$CYTHON" --cplus use_cross.pyx ) >"$tmp/err" 2>&1; then
+        printf 'OK    %-24s cross-cimport pair  [cython OK]\n' "$name"
+      else
+        cp "$tmp/err" "$OUT/$name.cython.log"
+        printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$OUT/$name.cython.log"
+        status=1
+      fi
+      rm -rf "$tmp"
     else
-      cp "$tmp/err" "$OUT/$name.cython.log"
-      printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$OUT/$name.cython.log"
-      status=1
+      printf 'OK    %-24s cross-cimport pair  [cython skipped]\n' "$name"
     fi
-    rm -rf "$tmp"
   else
     printf 'NG    %-24s generation failed\n' "$name"
     status=1
