@@ -107,9 +107,14 @@ def generate_pxd_cppast(
         argv.append(header)
 
         proc = subprocess.run(argv, capture_output=True, text=True)
+        # Two diagnostic formats reach stderr: the tool's own messages
+        # (`warning: ignoring malformed --typemap ...`) and cppast/libclang's
+        # bracketed logger (`[preprocessor] [warning] ...`, `[libclang]
+        # [error] ...` — a parse can degrade and still exit 0). Both must
+        # surface, or a degraded run comes back with an empty warning list.
         stderr_warnings = [
             line.strip() for line in proc.stderr.splitlines()
-            if "warning:" in line
+            if "warning:" in line or "[warning]" in line or "[error]" in line
         ]
         if proc.returncode != 0:
             tail = "\n".join(proc.stderr.splitlines()[-8:])

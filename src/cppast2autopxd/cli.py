@@ -104,7 +104,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "cppast (delegate to the cppast_autopxd binary; discovered "
              "via CPPAST2AUTOPXD_CPP_TOOL, PATH, or the installed "
              "cppast_autopxd_native wheel). The cppast backend supports "
-             "-I/-D/--std/--extra-cimport-style options only; anything it "
+             "-I/-D/--std only (extra cimports and typemap substitutions "
+             "are API parameters of generate_pxd_cppast); anything it "
              "cannot honor is an error, never silently ignored",
     )
     p.add_argument(
@@ -125,6 +126,17 @@ def main(argv=None) -> int:
 
     try:
         if args.config:
+            if args.backend != "libclang":
+                # run_config is the libclang batch pipeline; dispatching it
+                # here regardless of --backend silently handed back libclang
+                # output to a caller who asked for cppast.
+                print(
+                    "error: --config batch mode only supports the libclang "
+                    "backend (generate per-header with --backend cppast "
+                    "instead)",
+                    file=sys.stderr,
+                )
+                return 2
             run_config(load_config(args.config))
             return 0
 
