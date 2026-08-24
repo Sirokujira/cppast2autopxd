@@ -99,6 +99,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="do not append `except +` to signatures",
     )
     p.add_argument(
+        "--backend", choices=["libclang", "cppast"], default="libclang",
+        help="generation backend: libclang (this package's parser) or "
+             "cppast (delegate to the cppast_autopxd binary; discovered "
+             "via CPPAST2AUTOPXD_CPP_TOOL, PATH, or the installed "
+             "cppast_autopxd_native wheel). The cppast backend supports "
+             "-I/-D/--std/--extra-cimport-style options only; anything it "
+             "cannot honor is an error, never silently ignored",
+    )
+    p.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     return p
@@ -130,22 +139,53 @@ def main(argv=None) -> int:
             )
             return 2
 
-        result = generate_pxd(
-            args.header,
-            extern_from=args.extern_from,
-            include_dirs=args.include_dirs,
-            defines=args.defines,
-            std=args.std,
-            language=args.language,
-            macros=not args.no_macros,
-            namespaces=args.namespaces,
-            include_names=args.include_names,
-            exclude_names=args.exclude_names,
-            nogil=not args.no_nogil,
-            except_plus=False if args.no_except_plus else None,
-            compile_db=args.compile_db,
-        )
-    except (ParseError, ValueError) as err:
+        if args.backend == "cppast":
+            unsupported = [
+                name for name, val in (
+                    ("--extern-from", args.extern_from),
+                    ("--namespace", args.namespaces),
+                    ("--include-name", args.include_names),
+                    ("--exclude-name", args.exclude_names),
+                    ("--no-macros", args.no_macros),
+                    ("--no-nogil", args.no_nogil),
+                    ("--no-except-plus", args.no_except_plus),
+                    ("--compile-db", args.compile_db),
+                    ("--pyx-scaffold", args.pyx_scaffold),
+                    ("--language c", args.language == "c"),
+                ) if val
+            ]
+            if unsupported:
+                print(
+                    "error: the cppast backend cannot honor "
+                    + ", ".join(unsupported)
+                    + " (keep the libclang backend for these)",
+                    file=sys.stderr,
+                )
+                return 2
+            from .cppast_backend import generate_pxd_cppast
+            result = generate_pxd_cppast(
+                args.header,
+                include_dirs=args.include_dirs,
+                defines=args.defines,
+                std=args.std,
+            )
+        else:
+            result = generate_pxd(
+                args.header,
+                extern_from=args.extern_from,
+                include_dirs=args.include_dirs,
+                defines=args.defines,
+                std=args.std,
+                language=args.language,
+                macros=not args.no_macros,
+                namespaces=args.namespaces,
+                include_names=args.include_names,
+                exclude_names=args.exclude_names,
+                nogil=not args.no_nogil,
+                except_plus=False if args.no_except_plus else None,
+                compile_db=args.compile_db,
+            )
+    except (ParseError, ValueError, RuntimeError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
 

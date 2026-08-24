@@ -2,8 +2,10 @@
 expressed in a Cython ``.pxd`` file.
 
 The parser backend (currently libclang) produces these nodes; the emitter
-turns them into ``cdef extern from`` blocks.  Keeping the IR backend-agnostic
-is what will later allow a cppast (AST dump) based backend to slot in without
+turns them into ``cdef extern from`` blocks.  The cppast connection exists
+today as a DELEGATION backend (:mod:`cppast2autopxd.cppast_backend` hands a
+header to the cppast_autopxd binary), which bypasses this IR entirely; the
+backend-agnostic IR remains the slot for a future parser-level backend without
 touching the emitter.
 """
 
