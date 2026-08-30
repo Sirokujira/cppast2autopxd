@@ -178,15 +178,33 @@ template) to prove they are valid Cython, not just plausible text.
 
 ## Architecture
 
+Two backends produce the same kind of `.pxd`, selected with `--backend`:
+
 ```
-C++ header --(libclang parser: parser.py)--> IR (ir.py)
-                                              |
-              type spellings --(typemap.py)---+--> emitter.py --> .pxd
+                 libclang (default)
+C++ header --(parser.py)--> IR (ir.py) --(typemap.py)--> emitter.py --> .pxd
+
+                 cppast
+C++ header --> cppast_autopxd (cpp/, the real cppast library) --> .pxd
 ```
 
-The IR layer is backend-agnostic: a future backend can consume the AST dump
-of the [cppast](https://github.com/sirokujira/cppast) tool instead of using
-libclang bindings directly. See `docs/design.md`.
+The cppast path is a DELEGATION backend (`cppast_backend.py`): options map
+onto the binary's flags and its diagnostics — stderr `warning:` lines and
+every `# skipped:` comment — come back as `GenerationResult.warnings`, so
+nothing is dropped silently at the boundary. The emitter-mode options both
+implementations share are `extern_from`, `nogil` and `except_plus`
+(`--extern_from` / `--no_nogil` / `--except_plus` on the binary), which is
+what lets the cppast path generate from a self-contained mirror header
+while declaring the real include path. Anything the binary has no flag for
+— name filtering, `--no-macros`, `--compile-db`, `--pyx-scaffold`, C mode,
+and `--config` batch mode — is a hard error naming the option, never a
+silent downgrade.
+
+The IR layer stays backend-agnostic as the slot for a future parser-level
+backend (one that consumes an AST dump rather than a finished `.pxd`); the
+delegation backend deliberately does not fill it, because the C++ tool's
+emission is a token pipeline with no externalizable IR. See
+`docs/design.md`.
 
 ## License
 

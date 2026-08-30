@@ -54,6 +54,12 @@ OK    vectord                         821 bytes  (23 AST visits)  [cython OK]
 (`tests/input/draco/status.h`, a fetched/gitignored real header, is generated
 and checked too but is informational — see limitations below.)
 
+Two further gating blocks run after the fixture list: `options`, which
+composes `--extra_cimport` / `--typemap` / `--config` across a
+cross-cimporting pair (#51, #52), and `emit_modes`, which generates one
+fixture twice to cover `--extern_from` / `--except_plus` / `--no_nogil`
+(#54). Both end in the same `[cython OK]` gate.
+
 ### C++ — `tests/input/simple.h` → `tests/output/simple.pxd`
 
 Actual output (abridged):
@@ -390,6 +396,57 @@ below: cross-header names (1b) and member function templates (1c).
     include-root spelling `PCL_ROOT=/usr/include/pcl-1.12` — and a
     mismatch exits 1).
 
+53. the Python package gained a `cppast` BACKEND (`generate_pxd_cppast`,
+    `--backend cppast`): one header delegated to this binary, with options
+    mapped onto its flags and both diagnostic streams — stderr `warning:`
+    lines and every `# skipped:` comment — surfaced as
+    `GenerationResult.warnings`, so the never-silent contract crosses the
+    delegation boundary. Deliberately a delegation, not the IR-level
+    AST-dump parser the docs once imagined: this tool's emission is a
+    token pipeline with no externalizable IR.
+54. ~~that backend could not serve the downstream pipeline it was built
+    for: python-pcl_skbuild parses SELF-CONTAINED MIRROR headers but the
+    generated pxd must name the REAL PCL include path, and this tool
+    always wrote the parsed file's basename — so every pxd it produced
+    declared `cdef extern from "voxel_grid.h"` and the C++ compiler could
+    never find it. `nogil` was likewise hard-coded on and `except +` had
+    no spelling at all, so a C++ exception crossing the boundary
+    terminated the process~~ → `--extern_from PATH` (also accepted as an
+    `extern_from = ` config key, single-valued, a second one is a located
+    error), `--except_plus` and `--no_nogil`, the counterparts of the
+    Python emitter's `extern_from` / `except_plus` / `nogil`. The `except
+    +` placement follows two rules, both established by running the real
+    cython compiler rather than from memory:
+
+    | spelling | cython |
+    |---|---|
+    | `f() except + nogil const` | **OK** |
+    | `f() nogil const` | **OK** |
+    | `f() except +` | **OK** |
+    | `f() const except +` | error |
+    | `f() except + const` | error |
+    | `f() const nogil` | error |
+    | `f() nogil except +` | OK, but deprecated ("nogil should appear at the end") |
+
+    So `const` is legal only AFTER `nogil`, and `except +` only before it:
+    `except + nogil const` is the one accepted spelling of a const method,
+    and under `--no_nogil` there is no separator, so exception propagation
+    wins and the `const` is dropped (the same trade-off the Python emitter
+    makes). Independently, a MUTABLE-REFERENCE return (`T&`, including
+    `operator[]`, `at`, `front` and member function templates) is exempt:
+    cython's try/catch wrapping stores the result in a by-value temporary,
+    so `except +` there would silently hand out a reference to a copy —
+    which is why cython's own `libcpp` declarations omit it too. A
+    `const T&` return is by-value safe and does take it.
+    Verified against the pipeline: `pcl_point_cloud.h` generated with
+    `--extern_from pcl/point_cloud.h --except_plus --no_nogil` is
+    line-for-line the committed `src/pcl/pxd/point_cloud.pxd` of
+    python-pcl_skbuild apart from the order of two cimport lines.
+    Gating fixture `tests/input_options/emit_modes.h`, generated in both
+    modes and checked by CONTENT (a silently missing `except +` would
+    still cython-compile) as well as by the cython gate.
+
+
 ### Compilation-database mode (real PCL, verified on Linux)
 
 `--database_dir <build> --database_file <a-TU-in-the-db>` feeds cppast the
@@ -422,12 +479,9 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    the fetched `status.h`; the committed `statuslike.h` covering the rest of
    that header passes.)
 1b. ~~Cross-header names do not resolve~~ — closed by #51's
-   `--extra_cimport` / `--typemap`; the nine-header sweep is 8/9 with the
-   options composed. What remains open is convenience, not capability: the
-   flags are per-invocation, so a config-file driver (the pcl_headers.toml
-   role in python-pcl_skbuild's pipeline) would spare callers the
-   repetition. types.h itself stays out of scope (template
-   metaprogramming).
+   `--extra_cimport` / `--typemap` and #52's `--config`; the nine-header
+   sweep is 8/9 with the options composed. types.h itself stays out of
+   scope (template metaprogramming).
 1c. ~~Member FUNCTION templates lose their parameter list~~ — fixed by
    #48; PCLPointCloud2's `at` now emits `T& at[T](...)` and its only
    remaining sweep failures are family 1b names (PCLHeader, uindex_t).
@@ -435,6 +489,13 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    silently~~ — fixed by #49 (method-bearing structs promote).
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
+2b. **No name filtering.** `--include-name` / `--exclude-name` /
+   `--namespace` have no counterpart flags here, so the Python
+   `--backend cppast` path refuses them rather than degrading (as it does
+   for `--no-macros`, `--compile-db`, `--pyx-scaffold` and C mode).
+   python-pcl_skbuild's configs use none of them, so this is not what
+   keeps its pipeline on the libclang backend; what does is that batch
+   `--config` mode is libclang-only.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
    (they `#include` siblings); the committed `templates.h` / `vectord.h` /
    `statuslike.h` fixtures exercise the same constructs self-containedly.

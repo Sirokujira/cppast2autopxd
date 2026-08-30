@@ -104,9 +104,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "cppast (delegate to the cppast_autopxd binary; discovered "
              "via CPPAST2AUTOPXD_CPP_TOOL, PATH, or the installed "
              "cppast_autopxd_native wheel). The cppast backend supports "
-             "-I/-D/--std only (extra cimports and typemap substitutions "
-             "are API parameters of generate_pxd_cppast); anything it "
-             "cannot honor is an error, never silently ignored",
+             "-I/-D/--std, --extern-from, --no-nogil and --no-except-plus "
+             "(extra cimports and typemap substitutions are API parameters "
+             "of generate_pxd_cppast); anything it cannot honor is an "
+             "error, never silently ignored",
     )
     p.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -154,13 +155,10 @@ def main(argv=None) -> int:
         if args.backend == "cppast":
             unsupported = [
                 name for name, val in (
-                    ("--extern-from", args.extern_from),
                     ("--namespace", args.namespaces),
                     ("--include-name", args.include_names),
                     ("--exclude-name", args.exclude_names),
                     ("--no-macros", args.no_macros),
-                    ("--no-nogil", args.no_nogil),
-                    ("--no-except-plus", args.no_except_plus),
                     ("--compile-db", args.compile_db),
                     ("--pyx-scaffold", args.pyx_scaffold),
                     ("--language c", args.language == "c"),
@@ -180,6 +178,12 @@ def main(argv=None) -> int:
                 include_dirs=args.include_dirs,
                 defines=args.defines,
                 std=args.std,
+                extern_from=args.extern_from,
+                # The CLI's emission defaults must not depend on --backend:
+                # the C++ tool defaults except+ OFF, this CLI (like the
+                # libclang path) defaults it ON, so pass it explicitly.
+                nogil=not args.no_nogil,
+                except_plus=not args.no_except_plus,
             )
         else:
             result = generate_pxd(

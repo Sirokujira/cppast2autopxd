@@ -103,6 +103,104 @@ if [[ -d "$OPT_IN" ]]; then
   fi
 fi
 
+# --- emitter-mode block (gating): --extern_from / --except_plus / --no_nogil
+# The flags that let this tool stand in for the Python implementation in
+# python-pcl_skbuild's pxdgen pipeline. Generated twice from one fixture
+# (with and without nogil) because the `except +` placement rules differ:
+# `except + nogil const` is the only spelling cython accepts for a const
+# method, and with --no_nogil there is no separator so the const is dropped.
+# Checked by content, not just by exit code — an `except +` silently not
+# emitted would still cython-compile.
+if [[ -f "$ROOT/tests/input_options/emit_modes.h" ]]; then
+  name="emit_modes"
+  MODE_A="$OUT/emit_modes_nogil"; MODE_B="$OUT/emit_modes_no_nogil"
+  mkdir -p "$MODE_A" "$MODE_B"
+  # MODE_A takes extern_from from a CONFIG FILE and MODE_B from the flag, so
+  # both routes to the same setting are covered.
+  if "$TOOL" --output_dir "$MODE_A" --xml_dir "" --std "$STD" \
+        --config "$ROOT/tests/configs/emit_modes.conf" --except_plus \
+        "$ROOT/tests/input_options/emit_modes.h" >"$MODE_A/gen.log" 2>&1 \
+     && "$TOOL" --output_dir "$MODE_B" --xml_dir "" --std "$STD" \
+        --extern_from "demo/store.hpp" --except_plus --no_nogil \
+        "$ROOT/tests/input_options/emit_modes.h" >"$MODE_B/gen.log" 2>&1; then
+    a="$MODE_A/emit_modes.pxd"; b="$MODE_B/emit_modes.pxd"
+    bad=""
+    # --extern_from replaces the parsed file's name in both modes
+    grep -q 'cdef extern from "demo/store.hpp"' "$a" || bad="$bad extern_from(nogil)"
+    grep -q 'cdef extern from "demo/store.hpp"' "$b" || bad="$bad extern_from(no_nogil)"
+    # const method: the one accepted order, and const dropped without nogil
+    grep -q 'size_t size() except + nogil const$' "$a" || bad="$bad const-order"
+    grep -q 'size_t size() except +$' "$b" || bad="$bad const-dropped"
+    # mutable-reference returns stay exempt in both modes
+    grep -q 'Value& at(size_t i) nogil$' "$a" || bad="$bad mutable-ref(nogil)"
+    grep -q 'Value& at(size_t i)$' "$b" || bad="$bad mutable-ref(no_nogil)"
+    grep -q 'Value& operator\[\](size_t i) nogil$' "$a" || bad="$bad mutable-ref-op"
+    grep -q 'T& get\[T\](size_t i) nogil$' "$a" || bad="$bad mutable-ref-template"
+    # a const-reference return is by-value safe, so it DOES take except +
+    grep -q 'const Value& peek() except + nogil const$' "$a" || bad="$bad const-ref-return"
+    # constructors, operator() and free functions take it too
+    grep -q 'Store() except +$' "$a" || bad="$bad ctor"
+    grep -q 'int operator()(int a) except + nogil$' "$a" || bad="$bad call-operator"
+    grep -q 'size_t total(const Store& s) except + nogil$' "$a" || bad="$bad free-function"
+    # --no_nogil really removes it (no bare `nogil` anywhere)
+    grep -q ' nogil' "$b" && bad="$bad no_nogil-leak"
+    if [[ -n "$bad" ]]; then
+      printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"
+      status=1
+    elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
+      # same availability guard as cython_check
+      ok=1
+      for d in "$MODE_A" "$MODE_B"; do
+        ( cd "$d" && "$CYTHON" --cplus emit_modes.pxd ) >"$d/cython.log" 2>&1 || ok=0
+      done
+      if [[ $ok -eq 1 ]]; then
+        printf 'OK    %-24s both emitter modes  [cython OK]\n' "$name"
+      else
+        printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$MODE_A/cython.log"
+        status=1
+      fi
+    else
+      printf 'OK    %-24s both emitter modes  [cython skipped]\n' "$name"
+    fi
+  else
+    printf 'NG    %-24s generation failed\n' "$name"
+    status=1
+  fi
+
+  # extern_from is single-valued: a second one must be a LOCATED error, not
+  # a silent last-one-wins. (The repeatable keys have no such rule.)
+  dup="$OUT/emit_modes_dup.conf"
+  printf 'extern_from = a/one.h\nextern_from = b/two.h\n' > "$dup"
+  if "$TOOL" --output_dir "$MODE_A" --xml_dir "" --std "$STD" \
+        --config "$dup" "$ROOT/tests/input_options/emit_modes.h" \
+        >"$OUT/emit_modes_dup.log" 2>&1; then
+    printf 'NG    %-24s duplicate extern_from accepted silently\n' "emit_modes"
+    status=1
+  elif ! grep -q 'more than once' "$OUT/emit_modes_dup.log"; then
+    printf 'NG    %-24s duplicate extern_from failed without saying why\n' "emit_modes"
+    status=1
+  fi
+
+  # Precedence: unlike the repeatable keys (which APPEND), a config
+  # extern_from must LOSE to the flag — a command line silently overridden
+  # by a file is the same class of bug as a silently ignored rule.
+  prec="$OUT/emit_modes_prec.conf"
+  printf 'extern_from = from/config.h\n' > "$prec"
+  if "$TOOL" --output_dir "$MODE_A" --xml_dir "" --std "$STD" \
+        --config "$prec" --extern_from "from/flag.h" \
+        "$ROOT/tests/input_options/emit_modes.h" \
+        >"$OUT/emit_modes_prec.log" 2>&1 \
+     && grep -q 'cdef extern from "from/flag.h"' "$MODE_A/emit_modes.pxd"; then
+    :
+  else
+    printf 'NG    %-24s --extern_from did not win over the config key\n' "emit_modes"
+    status=1
+  fi
+else
+  printf 'NG    %-24s tests/input_options/emit_modes.h missing\n' "emit_modes"
+  status=1
+fi
+
 # --- real-PCL sweep (auto-skips without a PCL install; gates with one) -----
 # -f, not -x: the script is invoked through `bash`, so a checkout that drops
 # the exec bit (Windows, zip export, core.fileMode=false) must not silently

@@ -13,15 +13,16 @@ pipeline with no externalizable IR, and re-parsing its human-oriented dump
 would be a second fragile parser.  Delegation keeps one source of truth per
 implementation and connects them at the interface both actually share.
 
+``extern_from``, ``nogil`` and ``except_plus`` map onto the tool's
+``--extern_from`` / ``--no_nogil`` / ``--except_plus`` (FEASIBILITY #54),
+which is what lets this backend produce the declarations
+python-pcl_skbuild's pipeline needs: mirror header in, real PCL include
+path out, C++ exceptions propagating.
+
 Differences a caller must know (they raise, never silently degrade):
 
-- ``extern_from`` cannot be honored — the tool always uses the header
-  basename (FEASIBILITY #11), so a caller needing a different extern path
-  (python-pcl_skbuild's ``pcl/...`` real paths) must keep the libclang
-  backend.
 - name filtering (``namespaces``/``include_names``/``exclude_names``),
-  ``macros``, ``nogil``/``except_plus`` toggles and custom banners have no
-  counterpart flags.
+  ``macros`` and custom banners have no counterpart flags.
 
 Discovery is environment-driven (never a hard-coded path):
 ``CPPAST2AUTOPXD_CPP_TOOL``, then ``cppast-autopxd`` on PATH, then the
@@ -71,6 +72,9 @@ def generate_pxd_cppast(
     extra_cimports: Optional[List[str]] = None,
     fast_preprocessing: bool = False,
     config: Optional[str] = None,
+    extern_from: Optional[str] = None,
+    nogil: bool = True,
+    except_plus: bool = False,
 ) -> GenerationResult:
     """Generate pxd text for one header through the cppast_autopxd binary.
 
@@ -80,6 +84,10 @@ def generate_pxd_cppast(
     the result).  Warnings collect the tool's stderr ``warning:`` lines and
     every ``# skipped:`` comment in the output, keeping the never-silent
     contract visible to the caller.
+
+    ``nogil`` and ``except_plus`` default to the C++ tool's own defaults
+    (nogil on, except+ off), NOT to :class:`EmitOptions`' — a caller
+    porting a libclang configuration passes both explicitly.
     """
     tool = tool or find_cppast_tool()
     if tool is None:
@@ -104,6 +112,12 @@ def generate_pxd_cppast(
             argv += ["--typemap", f"{frm}={to}"]
         if config:
             argv += ["--config", config]
+        if extern_from:
+            argv += ["--extern_from", extern_from]
+        if not nogil:
+            argv.append("--no_nogil")
+        if except_plus:
+            argv.append("--except_plus")
         argv.append(header)
 
         proc = subprocess.run(argv, capture_output=True, text=True)

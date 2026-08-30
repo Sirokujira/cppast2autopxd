@@ -100,6 +100,17 @@ private:
     std::vector<std::string> extraCimports;
     std::vector<std::string> typemapSubstitutions;
 
+    // --extern_from: the path written into `cdef extern from "..."`. The pxd is
+    // generated from a self-contained MIRROR header, but the C++ compiler must
+    // include the REAL one (`pcl/point_cloud.h`), so the two names differ. Empty
+    // means "use the parsed file's basename", the previous behaviour.
+    std::string externFromOverride;
+
+    // --no_nogil / --except_plus: the counterparts of the Python
+    // implementation's `nogil` and `except_plus` emitter options.
+    bool emitNogil = true;
+    bool emitExceptPlus = false;
+
     // Template type-parameter names of the function template currently being
     // entered. cppast represents a free function template as a
     // function_template_t proxy wrapping the real function_t; the proxy carries
@@ -143,8 +154,10 @@ public:
     // AutoPxd(const std::string& filename, const std::string& output_folder = ".")
     AutoPxd(const std::string& filename, const std::string& output_folder = ".", const std::string& xml_folder = "",
             const std::vector<std::string>& extra_cimports = {},
-            const std::vector<std::string>& typemap_substitutions = {})
-        : extraCimports(extra_cimports), typemapSubstitutions(typemap_substitutions)
+            const std::vector<std::string>& typemap_substitutions = {},
+            const std::string& extern_from = "", bool emit_nogil = true, bool emit_except_plus = false)
+        : extraCimports(extra_cimports), typemapSubstitutions(typemap_substitutions),
+          externFromOverride(extern_from), emitNogil(emit_nogil), emitExceptPlus(emit_except_plus)
     {
         // そのまま設定すると、絶対パスになるため
         // 相対パスとして設定すること。
@@ -157,8 +170,10 @@ public:
         int ext_i = base_filename.find_last_of(".");
         std::string filename_without_ext = base_filename.substr(path_i, ext_i - path_i);
         std::string extname = base_filename.substr(ext_i, base_filename.size() - ext_i);
-        // header basename for the `cdef extern from` line
-        header_name = base_filename.substr(path_i);
+        // header basename for the `cdef extern from` line, unless --extern_from
+        // named the real header the C++ compiler has to include instead.
+        header_name = externFromOverride.empty() ? base_filename.substr(path_i)
+                                                 : externFromOverride;
 
         // autopxd_file = base_filename + ".pxd";
         // autopxd_file = filename_without_ext + ".pxd";
@@ -1179,6 +1194,90 @@ public:
             for(const auto& l : lines) { rest += l; rest += "\n"; }
         }
 
+        // --except_plus: append `except +` to every function/method/constructor
+        // so a C++ exception becomes a Python one instead of terminating the
+        // process. The counterpart of the Python implementation's
+        // `except_plus` emitter option, with the two rules the cython compiler
+        // establishes:
+        //
+        //   * ORDER. `const` is only legal AFTER `nogil`, and `except +` only
+        //     before it, so the one accepted spelling of a const method is
+        //     `... except + nogil const`. `const except +`, `except + const`
+        //     and `const nogil` are all syntax errors. With --no_nogil there is
+        //     no separator available, so `except +` wins and `const` is dropped
+        //     (matching the Python emitter).
+        //   * MUTABLE-REFERENCE RETURNS ARE EXEMPT. Cython's try/catch wrapping
+        //     stores the result in a by-value temporary, so `except +` on a
+        //     `T&` accessor (operator[], at, front, back) would silently hand
+        //     out a reference to a copy. Cython's own libcpp declarations do
+        //     the same.
+        //
+        // Runs before the typemap pass; `except +` carries no type name, so the
+        // two are order-independent, but keeping it first leaves the typemap
+        // operating on the final signature text.
+        if(emitExceptPlus)
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            for(auto& l : lines)
+            {
+                std::string t = l;
+                size_t ind = 0;
+                while(ind < t.size() && (t[ind] == ' ' || t[ind] == '\t')) ++ind;
+                t = t.substr(ind);
+                while(!t.empty() && (t.back() == ' ' || t.back() == '\t' || t.back() == '\r'))
+                    t.pop_back();
+                if(t.empty() || t[0] == '#') continue;
+                // Block headers and non-callable declarations never take it.
+                if(t.back() == ':') continue;
+                if(t.rfind("ctypedef", 0) == 0 || t.rfind("cdef ", 0) == 0 ||
+                   t.rfind("from ", 0) == 0 || t.rfind("cimport ", 0) == 0)
+                    continue;
+                size_t paramOpen = findParamListOpen(t);
+                if(paramOpen == std::string::npos) continue;
+                if(t.find(')', paramOpen) == std::string::npos) continue;
+                if(t.find("except +") != std::string::npos) continue;
+                if(returnsMutableReference(t, paramOpen)) continue;
+
+                // Split off the trailing modifiers our emitters appended.
+                std::string decl = t;
+                bool hadNogil = false, hadConst = false;
+                const std::string nogilConst = " nogil const";
+                const std::string nogilOnly = " nogil";
+                const std::string constOnly = " const";
+                if(decl.size() > nogilConst.size() &&
+                   decl.compare(decl.size() - nogilConst.size(), nogilConst.size(), nogilConst) == 0)
+                {
+                    decl.erase(decl.size() - nogilConst.size());
+                    hadNogil = hadConst = true;
+                }
+                else if(decl.size() > nogilOnly.size() &&
+                        decl.compare(decl.size() - nogilOnly.size(), nogilOnly.size(), nogilOnly) == 0)
+                {
+                    decl.erase(decl.size() - nogilOnly.size());
+                    hadNogil = true;
+                }
+                else if(decl.size() > constOnly.size() &&
+                        decl.compare(decl.size() - constOnly.size(), constOnly.size(), constOnly) == 0)
+                {
+                    decl.erase(decl.size() - constOnly.size());
+                    hadConst = true;
+                }
+                // A `const` with no `nogil` to separate it has to go: there is
+                // no legal ordering of `const` and `except +` on their own.
+                decl += " except +";
+                if(hadNogil) decl += " nogil";
+                if(hadNogil && hadConst) decl += " const";
+                l = std::string(ind, ' ') + decl;
+            }
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
         // --typemap FROM=TO substitutions: word-boundary textual replacement
         // over the final body, the C++ counterpart of the Python typemap's
         // substitutions (pcl_headers.toml). Runs BEFORE the symbol-driven
@@ -1681,6 +1780,78 @@ private:
         // (e.g. `from libcpp.string cimport string`). Strip the qualifier.
         myReplace(s, "std::", "");
         return s;
+    }
+
+    // Index of the '(' that opens the PARAMETER LIST of an emitted declaration,
+    // or npos when the line declares no callable. Brackets are tracked so a
+    // template argument (`vector[pair[int, int]] f(...)`) cannot be mistaken for
+    // one, and `operator()` is stepped over so its own parentheses do not read
+    // as the parameter list.
+    static std::string::size_type findParamListOpen(const std::string& t)
+    {
+        int square = 0, angle = 0;
+        for(std::string::size_type i = 0; i < t.size(); ++i)
+        {
+            char c = t[i];
+            if(c == '[') ++square;
+            else if(c == ']') { if(square) --square; }
+            else if(c == '<') ++angle;
+            else if(c == '>') { if(angle) --angle; }
+            else if(c == '(' && square == 0 && angle == 0)
+            {
+                static const std::string opWord = "operator";
+                if(i >= opWord.size() &&
+                   t.compare(i - opWord.size(), opWord.size(), opWord) == 0)
+                {
+                    // `operator()(args)`: skip this pair, the next '(' is it.
+                    std::string::size_type close = t.find(')', i);
+                    if(close == std::string::npos) return std::string::npos;
+                    i = close;
+                    continue;
+                }
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
+
+    // True when the declaration's RETURN TYPE is a non-const lvalue reference
+    // (`T&`), the case `except +` must not touch. The return type is whatever
+    // precedes the function name, so the name is consumed backwards from the
+    // parameter list: an optional `[T, ...]` member-template list, then the
+    // identifier (or an `operator` spelling with its symbols).
+    static bool returnsMutableReference(const std::string& t,
+                                        std::string::size_type paramOpen)
+    {
+        std::string::size_type i = paramOpen;
+        // member function template: `T& at[T](size_t)`
+        if(i > 0 && t[i - 1] == ']')
+        {
+            int depth = 0;
+            while(i > 0)
+            {
+                --i;
+                if(t[i] == ']') ++depth;
+                else if(t[i] == '[') { if(--depth == 0) break; }
+            }
+        }
+        // the name itself
+        while(i > 0 && (std::isalnum(static_cast<unsigned char>(t[i - 1])) ||
+                        t[i - 1] == '_' || t[i - 1] == '~'))
+            --i;
+        // an operator name carries symbols before the `operator` word
+        static const std::string opWord = "operator";
+        std::string::size_type j = i;
+        while(j > 0 && std::string("[]<>=!+-*/%&|^~()").find(t[j - 1]) != std::string::npos)
+            --j;
+        if(j >= opWord.size() && t.compare(j - opWord.size(), opWord.size(), opWord) == 0)
+            i = j - opWord.size();
+
+        std::string ret = t.substr(0, i);
+        while(!ret.empty() && (ret.back() == ' ' || ret.back() == '\t')) ret.pop_back();
+        if(ret.empty()) return false;              // constructor / destructor
+        if(ret.back() != '&') return false;
+        return ret.rfind("const ", 0) != 0;
     }
 
     // Move a `const` that qualifies a pointer/reference parameter type to the
@@ -2903,7 +3074,8 @@ private:
             // 消費したテンプレート引数はクリアする（自由関数側と同じ規約）。
             pendingFunctionTemplateParams.clear();
 
-            classFunctionName += " nogil";
+            if(emitNogil)
+                classFunctionName += " nogil";
             // インデントを保護しつつ宣言本体の空白を整形する。
             classFunctionDef += normalizeDeclIndented(classFunctionName);
             classFunctionDef += "\n";
@@ -3381,8 +3553,9 @@ private:
             // 消費したテンプレート引数はクリアする。
             pendingFunctionTemplateParams.clear();
 
-            // 末尾に nogil をつける。
-            functionName += " nogil";
+            // 末尾に nogil をつける。(--no_nogil で抑止できる。)
+            if(emitNogil)
+                functionName += " nogil";
             // インデントを保護しつつ宣言本体の空白を整形する。
             functionDef = normalizeDeclIndented(functionName);
             functionDef += "\n";

@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#33 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#54 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -37,6 +37,20 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
 - Fixture policy: committed `tests/input/*.h` are gating; subdirectories
   (`tests/input/draco/` etc.) are fetched real-world samples and
   informational. New behaviors get a committed, self-contained fixture.
+
+## Emitter modes
+
+- `--extern_from` / `--except_plus` / `--no_nogil` are the counterparts of
+  the Python emitter's `extern_from` / `except_plus` / `nogil`, and are
+  what lets this tool serve python-pcl_skbuild's pipeline through the
+  delegation backend. `extern_from` is also a config key, single-valued:
+  a duplicate is a located error and the command-line flag wins.
+- `except +` placement is compiler-proven, not guessed (#54):
+  `except + nogil const` is the ONLY accepted spelling of a const method
+  (`const except +`, `except + const` and `const nogil` are syntax
+  errors), so under `--no_nogil` the const is dropped. A non-const `T&`
+  return never takes `except +` — cython's try/catch stores a by-value
+  temporary, so the caller would get a reference to a copy.
 
 ## Skip discipline
 

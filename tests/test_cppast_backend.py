@@ -106,3 +106,105 @@ def test_tool_failure_is_loud():
             tool=_tool(),
             config="/definitely/not/a.conf",
         )
+
+
+EMIT_MODES = os.path.join(
+    REPO, "cpp", "tests", "input_options", "emit_modes.h"
+)
+
+
+def test_extern_from_and_except_plus(tmp_path):
+    """extern_from / except_plus map onto the tool's flags — the pair that
+    lets this backend produce what python-pcl_skbuild's pipeline needs:
+    parsed from a self-contained mirror header, but declaring the REAL
+    include path, with C++ exceptions propagating."""
+    result = generate_pxd_cppast(
+        EMIT_MODES, tool=_tool(),
+        extern_from="demo/store.hpp", except_plus=True,
+    )
+    assert 'cdef extern from "demo/store.hpp"' in result.text
+    assert "emit_modes.h" not in result.text
+    assert "Store() except +" in result.text
+    # `except + nogil const` is the only ordering cython accepts for a
+    # const method; `const except +` and `except + const` are errors.
+    assert "size_t size() except + nogil const" in result.text
+    # a mutable-reference return must stay exempt: cython's try/catch
+    # wrapping would hand back a reference to a by-value temporary.
+    assert "Value& at(size_t i) nogil" in result.text
+    assert "Value& at(size_t i) except" not in result.text
+    _cython_ok(
+        tmp_path, "emit_modes", result.text,
+        "from emit_modes cimport Store\n"
+        "def f():\n    cdef Store s\n    return s.size()\n",
+    )
+
+
+def test_no_nogil_drops_const_with_except_plus(tmp_path):
+    """With nogil=False there is no separator between `const` and
+    `except +`, so exception propagation wins and the const is dropped —
+    the same trade-off the libclang emitter makes."""
+    result = generate_pxd_cppast(
+        EMIT_MODES, tool=_tool(),
+        extern_from="demo/store.hpp", except_plus=True, nogil=False,
+    )
+    assert " nogil" not in result.text
+    assert "size_t size() except +" in result.text
+    assert "size_t size() except + const" not in result.text
+    _cython_ok(
+        tmp_path, "emit_modes", result.text,
+        "from emit_modes cimport Store\n"
+        "def f():\n    cdef Store s\n    return s.size()\n",
+    )
+
+
+def test_defaults_match_the_tool(tmp_path):
+    """Neither flag is passed by default: nogil on, except+ off. A caller
+    porting a libclang configuration has to say so explicitly."""
+    result = generate_pxd_cppast(EMIT_MODES, tool=_tool())
+    assert "except +" not in result.text
+    assert "size_t size() nogil const" in result.text
+    assert 'cdef extern from "emit_modes.h"' in result.text
+
+
+def test_cli_emission_defaults_do_not_depend_on_backend(tmp_path, capsys,
+                                                        monkeypatch):
+    """`--backend cppast` must not silently change what the CLI emits.
+
+    The C++ tool defaults except+ OFF; this CLI (like its libclang path)
+    defaults it ON, so the flag is passed explicitly. --extern-from,
+    --no-nogil and --no-except-plus are honored rather than refused.
+    """
+    from cppast2autopxd.cli import main
+
+    monkeypatch.setenv("CPPAST2AUTOPXD_CPP_TOOL", _tool())
+    out = tmp_path / "emit_modes.pxd"
+    rc = main([
+        EMIT_MODES, "--backend", "cppast",
+        "--extern-from", "demo/store.hpp", "-o", str(out),
+    ])
+    assert rc == 0
+    text = out.read_text()
+    assert 'cdef extern from "demo/store.hpp"' in text
+    assert "size_t size() except + nogil const" in text
+
+    rc = main([
+        EMIT_MODES, "--backend", "cppast",
+        "--no-except-plus", "--no-nogil", "-o", str(out),
+    ])
+    assert rc == 0
+    text = out.read_text()
+    assert "except +" not in text
+    assert "nogil" not in text
+
+
+def test_cli_still_refuses_what_the_backend_cannot_do(capsys, monkeypatch):
+    """Shrinking the unsupported list must not empty it: name filtering
+    and the other libclang-only options stay hard errors."""
+    from cppast2autopxd.cli import main
+
+    monkeypatch.setenv("CPPAST2AUTOPXD_CPP_TOOL", _tool())
+    for flag in (["--namespace", "demo"], ["--include-name", "Store"],
+                 ["--exclude-name", "Store"], ["--no-macros"],
+                 ["--language", "c"]):
+        assert main([EMIT_MODES, "--backend", "cppast"] + flag) == 2
+        assert "cannot honor" in capsys.readouterr().err
