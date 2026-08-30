@@ -10,6 +10,15 @@
 
 #include <cppast_config.h>
 
+// cxxopts splits a std::vector<> option's value on commas. Nothing this tool
+// takes is ever a comma-separated LIST — every repeatable option is passed
+// once per value — and the split silently mangled the values that do contain
+// commas: `--extra_cimport "from m cimport A, B"` arrived as two entries and
+// the second reached the pxd as a stray indented line (invalid Cython, exit
+// 0), which is the multi-symbol form python-pcl_skbuild's config uses in five
+// places. A --typemap TO like `vector[pair[int, int]]` broke the same way.
+// Take each value verbatim instead.
+#define CXXOPTS_VECTOR_DELIMITER '\0'
 #include <cxxopts.hpp>
 
 #include <cppast/code_generator.hpp>         // for generate_code()
@@ -477,11 +486,26 @@ main(int argc, char* argv[]) try {
           return 1;
 
     std::string extern_from;
-    if (options.count("extern_from"))
+    if (options.count("extern_from")) {
+      // Presence, not emptiness: `--extern_from ""` used to fall through to
+      // the config key, so the flag documented as winning quietly lost. An
+      // empty value is rejected here exactly as it is in a config file.
       extern_from = options["extern_from"].as<std::string>();
-    // a config-file entry only applies when the command line was silent
-    if (extern_from.empty())
+      if (extern_from.empty()) {
+        print_error("--extern_from needs a path");
+        return 1;
+      }
+    } else {
       extern_from = config_extern_from;
+    }
+    // The value is written between double quotes in `cdef extern from "..."`,
+    // so a `"` inside it closes the string early and produces silently broken
+    // Cython with exit 0 — the same class of trap as a '#' in a config value.
+    if (extern_from.find('"') != std::string::npos) {
+      print_error("extern_from must not contain '\"' (it is written inside a "
+                  "quoted Cython string): " + extern_from);
+      return 1;
+    }
 
     // autopxd = new AutoPxd(file->name());
     autopxd = new AutoPxd(file->name(), output_dir, xml_dir,

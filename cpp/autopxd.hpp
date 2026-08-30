@@ -1240,6 +1240,11 @@ public:
                 size_t paramOpen = findParamListOpen(t);
                 if(paramOpen == std::string::npos) continue;
                 if(t.find(')', paramOpen) == std::string::npos) continue;
+                // `int(* fp)(int, int)` is a function-pointer FIELD, not a
+                // callable: `except +` there stops stating the member's type
+                // and disagrees with both the libclang emitter and this
+                // tool's own handling of `ctypedef void(*H)(int)`.
+                if(paramOpen + 1 < t.size() && t[paramOpen + 1] == '*') continue;
                 if(t.find("except +") != std::string::npos) continue;
                 if(returnsMutableReference(t, paramOpen)) continue;
 
@@ -1789,19 +1794,28 @@ private:
     // as the parameter list.
     static std::string::size_type findParamListOpen(const std::string& t)
     {
-        int square = 0, angle = 0;
+        // NOTE: only square brackets are tracked. By the time this pass runs
+        // #33 has rewritten every template `<...>` to `[...]`, so the only `<`
+        // left in a declaration is an OPERATOR NAME — counting it as an open
+        // angle bracket made `operator<` and `operator<=` look like they had
+        // no parameter list at all, and they were then silently skipped while
+        // `operator>=` beside them got its `except +`.
+        int square = 0;
         for(std::string::size_type i = 0; i < t.size(); ++i)
         {
             char c = t[i];
             if(c == '[') ++square;
             else if(c == ']') { if(square) --square; }
-            else if(c == '<') ++angle;
-            else if(c == '>') { if(angle) --angle; }
-            else if(c == '(' && square == 0 && angle == 0)
+            else if(c == '(' && square == 0)
             {
                 static const std::string opWord = "operator";
+                std::string::size_type ow = i - opWord.size();
                 if(i >= opWord.size() &&
-                   t.compare(i - opWord.size(), opWord.size(), opWord) == 0)
+                   t.compare(ow, opWord.size(), opWord) == 0 &&
+                   // ...and `operator` must START a token: without this,
+                   // `myoperator(int)` matched and was silently skipped.
+                   (ow == 0 || !(std::isalnum(static_cast<unsigned char>(t[ow - 1]))
+                                 || t[ow - 1] == '_')))
                 {
                     // `operator()(args)`: skip this pair, the next '(' is it.
                     std::string::size_type close = t.find(')', i);

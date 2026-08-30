@@ -51,9 +51,22 @@ public:
     // callable object: `operator()` must not be mistaken for the parameter list
     int operator()(int a);
 
+    // comparison operators: `<` and `<=` must be recognised as names, not as
+    // open angle brackets (by this pass every template `<...>` is already
+    // `[...]`, so a `<` here is always an operator)
+    bool operator<(const Store& rhs) const;
+    bool operator<=(const Store& rhs) const;
+    bool operator>=(const Store& rhs) const;
+
+    // an identifier that merely ENDS in `operator` is an ordinary function
+    void myoperator(int a);
+
     // member function template
     template <typename T>
     T& get(std::size_t i);
+
+    // a function-pointer FIELD is not a callable declaration
+    int (*on_change)(int old_size, int new_size);
 
 private:
     std::size_t count_;

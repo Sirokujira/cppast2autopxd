@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#54 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#55 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -51,6 +51,13 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
   errors), so under `--no_nogil` the const is dropped. A non-const `T&`
   return never takes `except +` — cython's try/catch stores a by-value
   temporary, so the caller would get a reference to a copy.
+- Two traps the pass shape invites (#55): by this point templates are
+  already `[...]`, so a `<` in a declaration is an OPERATOR NAME, never a
+  bracket; and a `(` immediately followed by `*` is a function-pointer
+  DECLARATOR, not a parameter list.
+- Option values are taken verbatim: `CXXOPTS_VECTOR_DELIMITER` is disabled
+  in `main.cpp` because cxxopts otherwise splits a repeatable option's
+  value on commas, which silently broke `cimport A, B`.
 
 ## Skip discipline
 

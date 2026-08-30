@@ -446,6 +446,52 @@ below: cross-header names (1b) and member function templates (1c).
     modes and checked by CONTENT (a silently missing `except +` would
     still cython-compile) as well as by the cython gate.
 
+55. ~~#54 shipped with five silent misfires, four of them found by the
+    pxd-reviewer probing it and one by generating all 68 of
+    python-pcl_skbuild's mirror headers through the tool~~:
+
+    * **`<` in an operator NAME read as an open angle bracket.** By the
+      time the `except +` pass runs, #33 has rewritten every template
+      `<...>` to `[...]`, so the only `<` left in a declaration IS an
+      operator — and counting it made `operator<` / `operator<=` look
+      like they had no parameter list at all. They were skipped in
+      silence while `operator>=` one line below got its `except +`: one
+      comparison operator would `std::terminate` on a C++ exception and
+      its neighbour would propagate it. Visible on the already-committed
+      `smart_returns.h`, and invisible to both gates because the output
+      still compiles. → the angle counter is gone.
+    * **the `operator()` special case had no left token boundary**, so
+      any identifier ENDING in `operator` (`myoperator(int)`) matched
+      and was skipped the same way. → `operator` must start a token.
+    * **function-pointer FIELDS took `except +`** (`int(* fp)(int, int)
+      except +`), which stops stating the member's type and disagreed
+      both with the libclang emitter and with this tool's own handling
+      of `ctypedef void(*H)(int)`. → a `(` followed by `*` is a
+      declarator, not a parameter list.
+    * **`--extern_from ""` lost to the config key**, so the flag
+      documented as winning quietly lost; presence is tested now, and an
+      empty value is refused on BOTH routes. A `"` in the value closed
+      the Cython string early and emitted broken text at exit 0 — the
+      same class of trap as a `#` in a config value — so it is refused
+      too.
+    * **the option parser split every repeatable value on commas**
+      (cxxopts' `CXXOPTS_VECTOR_DELIMITER`), so
+      `--extra_cimport "from m cimport A, B"` arrived as two entries and
+      the second reached the pxd as a stray indented line: invalid
+      Cython, exit 0, no warning. That is the multi-symbol form
+      python-pcl_skbuild's config uses in five places, and a `--typemap`
+      TO like `vector[pair[int, int]]` broke identically. → the
+      delimiter is disabled; nothing here ever means a comma-separated
+      list, since every repeatable option is passed once per value.
+
+    All five were silent — no stderr, no `# skipped:` comment — which is
+    why the fixture now asserts by CONTENT and `cross_base.h` grew a
+    second exported name so the options block cimports two symbols. Each
+    assertion was mutation-tested: reverting a fix and rebuilding turns
+    the block red (`operator-lt operator-le name-ending-in-operator
+    function-pointer-field`, and `multi-symbol --extra_cimport was
+    split`).
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -489,6 +535,15 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    silently~~ — fixed by #49 (method-bearing structs promote).
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
+2c. **Foreign-namespace qualifiers survive.** `stripNamespaceQualifiers`
+   (#37/#44) removes the namespaces being emitted, not names imported
+   from elsewhere, so a shim header in `pclcompat` whose signatures
+   mention `pcl::CropBox` emits `pcl::CropBox[pcl::PointXYZ]` — `::` is
+   not Cython. The Python implementation resolves these through the
+   cimport (a qualified name whose tail is already known resolves to the
+   bare name). 17 of python-pcl_skbuild's 68 mirror headers hit this,
+   all of them `compat/` shims; it is the remaining reason that pipeline
+   cannot switch backends, alongside 2b's batch mode.
 2b. **No name filtering.** `--include-name` / `--exclude-name` /
    `--namespace` have no counterpart flags here, so the Python
    `--backend cppast` path refuses them rather than degrading (as it does

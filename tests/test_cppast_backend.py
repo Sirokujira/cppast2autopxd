@@ -208,3 +208,75 @@ def test_cli_still_refuses_what_the_backend_cannot_do(capsys, monkeypatch):
                  ["--language", "c"]):
         assert main([EMIT_MODES, "--backend", "cppast"] + flag) == 2
         assert "cannot honor" in capsys.readouterr().err
+
+
+def test_operator_names_are_not_angle_brackets(tmp_path):
+    """`<` in an operator NAME is not an open angle bracket.
+
+    Every template `<...>` is already `[...]` by the time the except+ pass
+    runs, so a `<` in a declaration is always an operator. Counting it as a
+    bracket made `operator<` and `operator<=` look like they had no
+    parameter list, and they were silently skipped while `operator>=`
+    beside them got its `except +` — one comparison operator terminating
+    on a C++ exception and its neighbour propagating it.
+    """
+    result = generate_pxd_cppast(
+        EMIT_MODES, tool=_tool(),
+        extern_from="demo/store.hpp", except_plus=True,
+    )
+    for op in ("<", "<=", ">="):
+        assert (
+            f"bool operator{op}(const Store& rhs) except + nogil const"
+            in result.text
+        ), f"operator{op} missing except +"
+    # `operator` must START a token, or myoperator() is skipped too
+    assert "void myoperator(int a) except + nogil" in result.text
+    # a function-pointer FIELD is not a callable declaration
+    assert "int(* on_change)(int, int)\n" in result.text
+    assert "on_change)(int, int) except" not in result.text
+    _cython_ok(
+        tmp_path, "emit_modes", result.text,
+        "from emit_modes cimport Store\n"
+        "def f():\n    cdef Store s\n    return s.size()\n",
+    )
+
+
+def test_multi_symbol_extra_cimport_survives(tmp_path):
+    """A cimport naming several symbols must reach the pxd as ONE line.
+
+    The option parser split every repeatable value on commas, so
+    `cimport A, B` arrived as two entries and the second was written out
+    as a stray indented line — invalid Cython at exit 0. It is the form
+    python-pcl_skbuild's config uses in five places.
+    """
+    base = generate_pxd_cppast(
+        os.path.join(REPO, "cpp", "tests", "input_options", "cross_base.h"),
+        tool=_tool(),
+    )
+    result = generate_pxd_cppast(
+        os.path.join(REPO, "cpp", "tests", "input_options", "cross_ref.h"),
+        tool=_tool(),
+        substitutions={"myindex_t": "uint32_t"},
+        extra_cimports=["from cross_base cimport Vec3, Vec3Alias"],
+    )
+    assert "from cross_base cimport Vec3, Vec3Alias\n" in result.text
+    assert "\n Vec3Alias" not in result.text
+    (tmp_path / "cross_base.pxd").write_text(base.text)
+    _cython_ok(
+        tmp_path, "cross_ref", result.text,
+        "from cross_ref cimport Path\n"
+        "def f():\n    cdef Path p\n    return p.count\n",
+    )
+
+
+def test_empty_and_quoted_extern_from_are_refused():
+    """Both routes to extern_from agree on what is invalid.
+
+    An empty value used to fall through to the config key, so the flag
+    documented as winning quietly lost; and a `"` closed the Cython string
+    early, emitting broken text with exit 0.
+    """
+    with pytest.raises(RuntimeError, match="failed"):
+        generate_pxd_cppast(
+            EMIT_MODES, tool=_tool(), extern_from='a"b.h',
+        )

@@ -77,9 +77,18 @@ if [[ -d "$OPT_IN" ]]; then
   name="options"
   if "$TOOL" --output_dir "$OUT" --xml_dir "" --std "$STD" "$OPT_IN/cross_base.h" >"$OUT/cross_base.log" 2>&1 \
      && "$TOOL" --output_dir "$OUT" --xml_dir "" --std "$STD" \
-          --extra_cimport "from cross_base cimport Vec3" \
+          --extra_cimport "from cross_base cimport Vec3, Vec3Alias" \
           --config "$ROOT/tests/configs/cross_ref.conf" \
           "$OPT_IN/cross_ref.h" >"$OUT/cross_ref.log" 2>&1; then
+    # A MULTI-SYMBOL cimport must survive as ONE line. cxxopts splits a
+    # vector option's value on commas by default, which turned this into two
+    # entries and wrote the second to the pxd as a stray indented line --
+    # invalid Cython with exit 0. It is the form python-pcl_skbuild's config
+    # uses, so keep a fixture on it.
+    if ! grep -q '^from cross_base cimport Vec3, Vec3Alias$' "$OUT/cross_ref.pxd"; then
+      printf 'NG    %-24s multi-symbol --extra_cimport was split\n' "$name"
+      status=1
+    fi
     if [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
       # same availability guard as cython_check: without a cython binary the
       # generation-only gate must stay green, not fail on this block.
@@ -142,6 +151,16 @@ if [[ -f "$ROOT/tests/input_options/emit_modes.h" ]]; then
     grep -q 'Store() except +$' "$a" || bad="$bad ctor"
     grep -q 'int operator()(int a) except + nogil$' "$a" || bad="$bad call-operator"
     grep -q 'size_t total(const Store& s) except + nogil$' "$a" || bad="$bad free-function"
+    # `<` in an operator NAME is not an open angle bracket (every template
+    # `<...>` is already `[...]` by this pass): operator< and operator<= must
+    # not silently miss the `except +` their neighbours get.
+    grep -q 'bool operator<(const Store& rhs) except + nogil const$' "$a" || bad="$bad operator-lt"
+    grep -q 'bool operator<=(const Store& rhs) except + nogil const$' "$a" || bad="$bad operator-le"
+    grep -q 'bool operator>=(const Store& rhs) except + nogil const$' "$a" || bad="$bad operator-ge"
+    # `operator` must start a token: myoperator() is an ordinary function
+    grep -q 'void myoperator(int a) except + nogil$' "$a" || bad="$bad name-ending-in-operator"
+    # a function-pointer FIELD is not a callable declaration
+    grep -q 'int(\* on_change)(int, int)$' "$a" || bad="$bad function-pointer-field"
     # --no_nogil really removes it (no bare `nogil` anywhere)
     grep -q ' nogil' "$b" && bad="$bad no_nogil-leak"
     if [[ -n "$bad" ]]; then
