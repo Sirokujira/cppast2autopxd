@@ -249,6 +249,27 @@ if [[ -f "$ROOT/tests/input_options/name_resolution.h" ]]; then
     grep -q 'int saveWidget(const Widget& w, bool binary, size_t precision) except + nogil$' "$f" \
       || bad="$bad default-arity-3"
     grep -q '=false\|= false\|=8\|= 8' "$f" && bad="$bad default-value-leaked"
+    # a `::` that appears ONLY in a default value must not kill the
+    # declaration: the default text is deleted before anything judges it
+    grep -q 'void setLimits(Widget& w) except + nogil$' "$f" || bad="$bad default-only-qualifier"
+    grep -q 'void setLimits(Widget& w, float lo, float hi) except + nogil$' "$f" \
+      || bad="$bad default-only-qualifier-full"
+    # a function-pointer typedef keeps its parameter TYPES: dropping the
+    # template brackets glued the argument onto the name, and the resolution
+    # pass then turned that into a silently WRONG type
+    grep -q 'ctypedef void(\*WidgetCb)(shared_ptr\[Widget\], void\*)$' "$f" \
+      || bad="$bad fnptr-template-arg"
+    # a dependent name has no qualifier NAME before the `::`; resolving would
+    # glue the tail onto the previous token, so it must skip instead
+    grep -q '# skipped: vector\[int\]::iterator firstOf' "$f" || bad="$bad dependent-name"
+    # ctypedef / using / union bind usable names, so a local reference to them
+    # resolves rather than being reported unresolvable
+    grep -q 'void useIndex(Index i) except + nogil$' "$f" || bad="$bad harvest-ctypedef"
+    grep -q 'void useScalar(Scalar s) except + nogil$' "$f" || bad="$bad harvest-using"
+    grep -q 'void useCell(const Cell& c) except + nogil$' "$f" || bad="$bad harvest-union"
+    # a DATA MEMBER named with a Python keyword is an "Empty declarator" too
+    grep -q '^        int in_$' "$f" || bad="$bad keyword-field"
+    grep -q '^        float lambda_$' "$f" || bad="$bad keyword-field-lambda"
     if [[ -n "$bad" ]]; then
       printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
     elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then

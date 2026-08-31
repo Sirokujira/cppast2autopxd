@@ -910,6 +910,106 @@ public:
         //   - rvalue references (T&&): move ctors/assignment are not callable
         //     from Cython and only produce parser warnings/noise
         // Each dropped line is kept as a comment for auditability.
+        // C++ DEFAULT ARGUMENTS expand into overloads.
+        //
+        // A pxd cannot carry a default: `bool binary_mode=false` is a syntax
+        // error, and `=*` — the .pyx spelling — is rejected inside `cdef
+        // extern` too (probed against the compiler; it is only for template
+        // parameter defaults). The libclang emitter answers this by emitting
+        // one declaration per callable arity, and so does this pass, so a
+        // caller can still omit the defaulted arguments.
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            std::vector<std::string> out;
+            for(const auto& l : lines)
+            {
+                std::string t = l;
+                size_t ind = 0;
+                while(ind < t.size() && (t[ind]==' '||t[ind]=='\t')) ++ind;
+                std::string body = t.substr(ind);
+                if(body.empty() || body[0]=='#' || body.back()==':' ||
+                   body.rfind("ctypedef",0)==0 || body.rfind("cdef ",0)==0 ||
+                   body.rfind("from ",0)==0 || body.rfind("cimport ",0)==0)
+                { out.push_back(l); continue; }
+                size_t open_ = findParamListOpen(body);
+                if(open_ == std::string::npos) { out.push_back(l); continue; }
+                // matching close paren of the parameter list
+                int depth = 0; size_t close_ = std::string::npos;
+                for(size_t i = open_; i < body.size(); ++i)
+                {
+                    if(body[i]=='(') depth++;
+                    else if(body[i]==')') { if(--depth==0) { close_=i; break; } }
+                }
+                if(close_ == std::string::npos) { out.push_back(l); continue; }
+                std::string head = body.substr(0, open_ + 1);
+                std::string tail = body.substr(close_);          // ") nogil const"
+                std::string params = body.substr(open_ + 1, close_ - open_ - 1);
+                // split on TOP-LEVEL commas
+                std::vector<std::string> parts;
+                {
+                    int d = 0; size_t b = 0;
+                    for(size_t i = 0; i <= params.size(); ++i)
+                    {
+                        if(i == params.size() || (params[i]==',' && d==0))
+                        { parts.push_back(params.substr(b, i-b)); b = i+1; }
+                        else if(params[i]=='('||params[i]=='['||params[i]=='<') d++;
+                        else if(params[i]==')'||params[i]==']'||params[i]=='>') { if(d) d--; }
+                    }
+                }
+                // strip a top-level default from each part; note the first one
+                size_t firstDefault = parts.size();
+                for(size_t i = 0; i < parts.size(); ++i)
+                {
+                    int d = 0;
+                    for(size_t k = 0; k < parts[i].size(); ++k)
+                    {
+                        char c = parts[i][k];
+                        if(c=='('||c=='['||c=='<') d++;
+                        else if(c==')'||c==']'||c=='>') { if(d) d--; }
+                        else if(c=='=' && d==0)
+                        {
+                            if(k+1 < parts[i].size() && parts[i][k+1]=='=') break;
+                            if(k>0 && std::string("<>!+-*/%&|^=").find(parts[i][k-1])
+                                          != std::string::npos) break;
+                            parts[i] = parts[i].substr(0, k);
+                            while(!parts[i].empty() &&
+                                  (parts[i].back()==' '||parts[i].back()=='\t'))
+                                parts[i].pop_back();
+                            if(i < firstDefault) firstDefault = i;
+                            break;
+                        }
+                    }
+                }
+                if(firstDefault == parts.size()) { out.push_back(l); continue; }
+                for(size_t n = firstDefault; n <= parts.size(); ++n)
+                {
+                    std::string joined;
+                    for(size_t i = 0; i < n; ++i)
+                    {
+                        if(i) joined += ",";
+                        joined += parts[i];
+                    }
+                    // a trailing empty parameter list must not keep a stray space
+                    size_t f = joined.find_first_not_of(" \t");
+                    joined = (f == std::string::npos) ? "" : joined.substr(f);
+                    out.push_back(std::string(ind, ' ') + head + joined + tail);
+                }
+            }
+            rest.clear();
+            for(const auto& l : out) { rest += l; rest += "\n"; }
+        }
+
+        // NOTE ON ORDER: this runs BEFORE the qualified-name and skip passes.
+        // A default value can be the only place a `::` appears
+        // (`float lo = -std::numeric_limits<float>::max()`), and the skip pass
+        // would then comment out a declaration whose parameter types are all
+        // perfectly expressible — the default text it tripped on is deleted
+        // right here.
         // Resolve QUALIFIED names that name another namespace's types.
         //
         // stripNamespaceQualifiers removes the namespaces being emitted, not
@@ -937,9 +1037,23 @@ public:
                 std::string t = l;
                 size_t p0 = 0; while(p0 < t.size() && t[p0] == ' ') p0++;
                 t = t.substr(p0);
+                // a `ctypedef <anything> NAME` binds its LAST token, and a
+                // union declares a usable name like a struct does; missing
+                // both meant a locally-declared type could be reported as
+                // unresolvable and dropped.
+                if(t.rfind("ctypedef ", 0) == 0)
+                {
+                    size_t e = t.size();
+                    while(e > 0 && !(std::isalnum((unsigned char)t[e-1]) || t[e-1]=='_')) e--;
+                    size_t b = e;
+                    while(b > 0 && (std::isalnum((unsigned char)t[b-1]) || t[b-1]=='_')) b--;
+                    if(e > b) knownNames.push_back(t.substr(b, e - b));
+                    continue;
+                }
                 static const char* heads[] = { "cdef cppclass ", "cdef struct ",
-                                               "cdef enum ", "cppclass ",
-                                               "struct ", "enum " };
+                                               "cdef enum ", "cdef union ",
+                                               "cppclass ", "struct ", "enum ",
+                                               "union " };
                 for(const char* h : heads)
                 {
                     size_t hl = std::char_traits<char>::length(h);
@@ -972,6 +1086,12 @@ public:
                         start = b;
                         break;
                     }
+                    // No qualifier NAME precedes the `::` — it qualifies an
+                    // expression, as in a dependent name (`vector[int]::iterator`
+                    // once the angle->square pass has run). Deleting it there
+                    // would glue the tail onto the previous token and emit
+                    // silently broken text, so leave it for the skip pass.
+                    bool leadingSegment = start < pos;
                     // the tail is the identifier after the LAST `::`
                     size_t last = pos;
                     size_t scan = pos;
@@ -987,7 +1107,7 @@ public:
                     size_t tb = last + 2, te = tb;
                     while(te < l.size() && isIdentChar(l[te])) te++;
                     std::string tail = l.substr(tb, te - tb);
-                    if(!tail.empty() &&
+                    if(leadingSegment && !tail.empty() &&
                        std::find(knownNames.begin(), knownNames.end(), tail)
                            != knownNames.end())
                     {
@@ -1328,100 +1448,6 @@ public:
             for(const auto& l : lines) { rest += l; rest += "\n"; }
         }
 
-        // C++ DEFAULT ARGUMENTS expand into overloads.
-        //
-        // A pxd cannot carry a default: `bool binary_mode=false` is a syntax
-        // error, and `=*` — the .pyx spelling — is rejected inside `cdef
-        // extern` too (probed against the compiler; it is only for template
-        // parameter defaults). The libclang emitter answers this by emitting
-        // one declaration per callable arity, and so does this pass, so a
-        // caller can still omit the defaulted arguments.
-        {
-            std::vector<std::string> lines;
-            {
-                std::string line;
-                std::istringstream iss(rest);
-                while(std::getline(iss, line)) lines.push_back(line);
-            }
-            std::vector<std::string> out;
-            for(const auto& l : lines)
-            {
-                std::string t = l;
-                size_t ind = 0;
-                while(ind < t.size() && (t[ind]==' '||t[ind]=='\t')) ++ind;
-                std::string body = t.substr(ind);
-                if(body.empty() || body[0]=='#' || body.back()==':' ||
-                   body.rfind("ctypedef",0)==0 || body.rfind("cdef ",0)==0 ||
-                   body.rfind("from ",0)==0 || body.rfind("cimport ",0)==0)
-                { out.push_back(l); continue; }
-                size_t open_ = findParamListOpen(body);
-                if(open_ == std::string::npos) { out.push_back(l); continue; }
-                // matching close paren of the parameter list
-                int depth = 0; size_t close_ = std::string::npos;
-                for(size_t i = open_; i < body.size(); ++i)
-                {
-                    if(body[i]=='(') depth++;
-                    else if(body[i]==')') { if(--depth==0) { close_=i; break; } }
-                }
-                if(close_ == std::string::npos) { out.push_back(l); continue; }
-                std::string head = body.substr(0, open_ + 1);
-                std::string tail = body.substr(close_);          // ") nogil const"
-                std::string params = body.substr(open_ + 1, close_ - open_ - 1);
-                // split on TOP-LEVEL commas
-                std::vector<std::string> parts;
-                {
-                    int d = 0; size_t b = 0;
-                    for(size_t i = 0; i <= params.size(); ++i)
-                    {
-                        if(i == params.size() || (params[i]==',' && d==0))
-                        { parts.push_back(params.substr(b, i-b)); b = i+1; }
-                        else if(params[i]=='('||params[i]=='['||params[i]=='<') d++;
-                        else if(params[i]==')'||params[i]==']'||params[i]=='>') { if(d) d--; }
-                    }
-                }
-                // strip a top-level default from each part; note the first one
-                size_t firstDefault = parts.size();
-                for(size_t i = 0; i < parts.size(); ++i)
-                {
-                    int d = 0;
-                    for(size_t k = 0; k < parts[i].size(); ++k)
-                    {
-                        char c = parts[i][k];
-                        if(c=='('||c=='['||c=='<') d++;
-                        else if(c==')'||c==']'||c=='>') { if(d) d--; }
-                        else if(c=='=' && d==0)
-                        {
-                            if(k+1 < parts[i].size() && parts[i][k+1]=='=') break;
-                            if(k>0 && std::string("<>!+-*/%&|^=").find(parts[i][k-1])
-                                          != std::string::npos) break;
-                            parts[i] = parts[i].substr(0, k);
-                            while(!parts[i].empty() &&
-                                  (parts[i].back()==' '||parts[i].back()=='\t'))
-                                parts[i].pop_back();
-                            if(i < firstDefault) firstDefault = i;
-                            break;
-                        }
-                    }
-                }
-                if(firstDefault == parts.size()) { out.push_back(l); continue; }
-                for(size_t n = firstDefault; n <= parts.size(); ++n)
-                {
-                    std::string joined;
-                    for(size_t i = 0; i < n; ++i)
-                    {
-                        if(i) joined += ",";
-                        joined += parts[i];
-                    }
-                    // a trailing empty parameter list must not keep a stray space
-                    size_t f = joined.find_first_not_of(" \t");
-                    joined = (f == std::string::npos) ? "" : joined.substr(f);
-                    out.push_back(std::string(ind, ' ') + head + joined + tail);
-                }
-            }
-            rest.clear();
-            for(const auto& l : out) { rest += l; rest += "\n"; }
-        }
-
         // PYTHON KEYWORDS used as parameter names.
         //
         // Names in an extern declaration are documentation, but cython still
@@ -1451,7 +1477,28 @@ public:
                    t.rfind("cimport ",0)==0 || t.find("cdef extern from")!=std::string::npos)
                     continue;
                 size_t open_ = findParamListOpen(t);
-                if(open_ == std::string::npos) continue;
+                if(open_ == std::string::npos)
+                {
+                    // No parameter list: a DATA MEMBER can still be named with
+                    // a keyword (`int in;`, `float lambda;` are ordinary C++
+                    // and `int in` is an "Empty declarator" to cython). The
+                    // name is the last token of the declaration.
+                    if(t.back() == ':' || t.find('=') != std::string::npos) continue;
+                    size_t e = t.size();
+                    while(e > 0 && !(std::isalnum((unsigned char)t[e-1]) || t[e-1]=='_')) e--;
+                    size_t b = e;
+                    while(b > 0 && (std::isalnum((unsigned char)t[b-1]) || t[b-1]=='_')) b--;
+                    if(b == e || b == 0) continue;          // needs a type before it
+                    if(!(t[b-1]==' '||t[b-1]=='\t'||t[b-1]=='*'||t[b-1]=='&')) continue;
+                    std::string name = t.substr(b, e-b);
+                    for(const char* k : kw)
+                        if(name == k)
+                        {
+                            l = std::string(ind, ' ') + t.substr(0, e) + "_" + t.substr(e);
+                            break;
+                        }
+                    continue;
+                }
                 // a parameter NAME is the identifier just before `,` or `)`
                 std::string outp = t;
                 for(size_t i = outp.size(); i-- > open_;)
@@ -2612,12 +2659,19 @@ private:
                     else if(tmpPunctuation == "<")
                     {
                         // テンプレート開始: Foo<...> -> Foo[...]
-                        typeRhs += "[";
+                        // Inside a function-pointer typedef's PARAMETER LIST
+                        // the brackets were dropped entirely, gluing the
+                        // argument onto the template name
+                        // (`shared_ptr<pcl::PointCloud<pcl::PointXYZ>>` came
+                        // out as `shared_ptrpcl::PointCloud[pcl::PointXYZ]`).
+                        if(isPunctuation) typeCallbackDefineName += "[";
+                        else              typeRhs += "[";
                     }
                     else if(tmpPunctuation == ">")
                     {
                         // テンプレート終了
-                        typeRhs += "]";
+                        if(isPunctuation) typeCallbackDefineName += "]";
+                        else              typeRhs += "]";
                     }
                     else
                     {

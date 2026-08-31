@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#56 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#57 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -74,7 +74,13 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
   `cdef extern`; it is only for template parameter defaults), so C++
   defaults expand into one declaration per callable arity.
 - Parameter names are documentation, but cython still parses them: a
-  Python keyword (`in`) gets a `_` suffix.
+  Python keyword (`in`) gets a `_` suffix — and so does a DATA MEMBER
+  named that way, which is an "Empty declarator" all the same.
+- Resolution needs a leading qualifier NAME. After the angle->square pass a
+  dependent name reads `vector[int]::iterator`; there is nothing to strip,
+  so it skips. And a name the emitter GLUED (`shared_ptrpcl::X`) must be
+  fixed where it is glued, never resolved — resolving it yields a pxd
+  cython accepts and the C++ compiler rejects (#57).
 
 ## Skip discipline
 

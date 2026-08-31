@@ -6,3 +6,4 @@ namespace other {
 struct Widget { int id; };
 struct Gadget { int id; };
 }  // namespace other
+

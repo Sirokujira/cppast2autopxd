@@ -327,6 +327,25 @@ def test_name_resolution_rules(tmp_path):
     )
     assert "false" not in text
 
+    # a `::` appearing ONLY in a default value must not kill the declaration
+    assert "void setLimits(Widget& w) except + nogil" in text
+    assert "void setLimits(Widget& w, float lo, float hi) except + nogil" in text
+    # a function-pointer typedef keeps its parameter TYPES: dropping the
+    # template brackets glued the argument onto the name, which the
+    # resolution pass then turned into a silently WRONG type
+    assert "ctypedef void(*WidgetCb)(shared_ptr[Widget], void*)" in text
+    # a dependent name has no qualifier NAME before the `::`
+    assert any("firstOf" in w and "does not resolve" in w
+               for w in result.warnings), result.warnings
+    assert "vector[int]iterator" not in text
+    # ctypedef / using / union bind usable names
+    assert "void useIndex(Index i) except + nogil" in text
+    assert "void useScalar(Scalar s) except + nogil" in text
+    assert "void useCell(const Cell& c) except + nogil" in text
+    # a keyword-named DATA MEMBER is an "Empty declarator" too
+    assert "\n        int in_\n" in text
+    assert "\n        float lambda_\n" in text
+
     (tmp_path / "other_types.pxd").write_text("cdef struct Widget:\n    int id\n")
     _cython_ok(
         tmp_path, "name_resolution", text,

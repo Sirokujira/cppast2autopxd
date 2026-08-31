@@ -548,6 +548,47 @@ below: cross-header names (1b) and member function templates (1c).
     `void(*)(shared_ptr<PointCloud<PointXYZ>>, void*)`) — recorded as
     limitation 2d.
 
+57. ~~#56 shipped with five defects, one of which INVERTED the never-silent
+    rule it was meant to serve~~ (found by the pxd-reviewer):
+
+    * **a glued prefix was silently deleted, producing a WRONG TYPE.** A
+      function-pointer typedef's parameter list dropped its template
+      brackets, so `void(*)(shared_ptr<pcl::PointCloud<pcl::PointXYZ>>,
+      void*)` emitted `shared_ptrpcl::PointCloud[pcl::PointXYZ]` — which
+      cython rejected loudly. #56's resolution pass then widened left over
+      `shared_ptrpcl` and "resolved" it to `PointCloud`, giving a pxd
+      cython ACCEPTS and `g++` rejects at the call site (`invalid
+      conversion from void(*)(PointCloud, void*)`). A loud failure became
+      a silent one. → fixed at the source: inside a function-pointer
+      typedef's parameter list the `<`/`>` now become `[`/`]` like
+      everywhere else, so the name is never glued and the pass has nothing
+      to mis-resolve. `compat/grabber_callback.h` now emits
+      `shared_ptr[PointCloud[PointXYZ]]`, matching the libclang output but
+      for the parameter names.
+    * **a `::` with no qualifier NAME before it glued the tail.** After the
+      angle->square pass a dependent name reads `vector[int]::iterator`;
+      `]` is not an identifier character, so the left-widening found
+      nothing, deleted just the `::`, and emitted `vector[int]iterator` —
+      invalid, with no skip comment. → resolution requires a leading
+      segment; otherwise the declaration skips with its reason.
+    * **pass order lost declarations whose only `::` was in a DEFAULT.**
+      `float lo = -std::numeric_limits<float>::max()` (how real
+      `pcl/io/pcd_io.h` is written) made the skip pass comment out a
+      declaration whose parameter types were all expressible — the
+      offending text is deleted a few passes later. → default expansion
+      moved ahead of the qualified/skip passes.
+    * **the local-name harvest saw only classes**, so `typedef` / `using` /
+      `union` names declared in the very same pxd were reported
+      unresolvable and dropped.
+    * **the keyword rule was parameter-only**, so a DATA MEMBER named `in`
+      or `lambda` (ordinary C++) reached cython as an "Empty declarator"
+      and failed the whole file, silently.
+
+    The 68-header measurement is unchanged at 68/68 compiling and 57/68
+    line-for-line, but now with **zero `# skipped:` comments** — nothing is
+    dropped, loudly or otherwise. `name_resolution.h` grew a case for each
+    defect; every assertion was checked to fail without its fix.
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -593,14 +634,12 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    function argument not supported") — harmless but noise.
 2c. ~~Foreign-namespace qualifiers survive~~ — closed by #56; an
    unresolvable tail now skips with a reason instead of emitting `::`.
-2d. **A function-pointer `ctypedef` loses its parameter names and any
-   template wrapper on them**: `void(*)(shared_ptr<PointCloud<PointXYZ>>,
-   void*)` emits `ctypedef void(*Fn)(PointCloud[PointXYZ], void*)`. The
-   declaration compiles but no longer states the C++ type, so a call
-   through it would be wrong. One header of python-pcl_skbuild's 68
-   (`compat/grabber_callback.h`) is affected. Batch `--config` mode
-   (2b) and this are what still keep that pipeline on the libclang
-   backend.
+2d. **A function-pointer `ctypedef` loses its parameter NAMES** (the
+   types are correct as of #57): `ctypedef void(*Fn)(shared_ptr[Widget],
+   void*)` where the libclang emitter writes `(shared_ptr[Widget] w,
+   void* user_data)`. Names in an extern declaration are documentation, so
+   this is cosmetic. Batch `--config` mode (2b) is what still keeps
+   python-pcl_skbuild's pipeline on the libclang backend.
 2b. **No name filtering.** `--include-name` / `--exclude-name` /
    `--namespace` have no counterpart flags here, so the Python
    `--backend cppast` path refuses them rather than degrading (as it does
