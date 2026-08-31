@@ -492,6 +492,62 @@ below: cross-header names (1b) and member function templates (1c).
     function-pointer-field`, and `multi-symbol --extra_cimport was
     split`).
 
+56. ~~generating all 68 of python-pcl_skbuild's mirror headers through
+    this tool produced pxd that cython rejected, for four unrelated
+    reasons — the last barrier between the delegation backend and the
+    real pipeline~~:
+
+    * **foreign-namespace qualifiers survived** (limitation 2c).
+      `stripNamespaceQualifiers` removes the namespaces being EMITTED, so
+      a shim in `pclcompat` naming `pcl::CropBox` emitted
+      `pcl::CropBox[pcl::PointXYZ]`, and `::` is not Cython. → a pass
+      resolves a qualified name whose TAIL is already known — cimported
+      (including via `--extra_cimport`) or declared in this file — to that
+      bare name, which is how the Python implementation handles it:
+      Cython has no qualification for a cimported name, so the cimport IS
+      the statement of what the bare name means. An UNKNOWN tail is not
+      guessed at; it becomes a `# skipped:` comment naming the reason.
+      This also required tracking every name a cimport line brings in:
+      the dedup key is its last token, so `cimport PointXYZ, Normal` had
+      only ever registered `Normal`.
+    * **any identifier CONTAINING `const` was corrupted.**
+      `normalizeDeclSpacing` searched for the substring, so `reconstruct`
+      became `re ruct` (a space inserted either side, then
+      `dropValueParamConst` ate the middle), `constant_value` became
+      `ant_value` and `const_pointer` became `const _pointer` — silently,
+      in output cython then rejected. → the scan respects word
+      boundaries, and the `const<letter>` direction is gone entirely: it
+      cannot be told from `constant_value` / `constructor` /
+      `const_pointer`, and libclang prints the keyword with a separator
+      anyway, so there was nothing real to recover there.
+    * **Python keywords used as parameter names.** `in` is a legal C++
+      name (PCL's transform shims use it) and a syntax error in a pxd. →
+      suffixed with `_`, as the libclang emitter does.
+    * **C++ default arguments.** A pxd cannot carry one, and `=*` — the
+      .pyx spelling — is rejected inside `cdef extern` too (probed: it is
+      only for template parameter defaults). → they expand into one
+      declaration per callable arity, matching the libclang emitter, so a
+      caller can still omit them.
+
+    Measured on the pipeline, generating every header with its own
+    config (extern_from, extra_cimports, typemap, `--except_plus
+    --no_nogil`): **68/68 now compile under cython** with the siblings on
+    the include path — 0 before this entry — and 57 of the 68 are
+    line-for-line the committed libclang output (4 exactly, 53 modulo
+    cimport order). Gating fixture `tests/input_options/name_resolution.h`
+    plus `tests/configs/name_resolution.conf` cover all four rules and
+    the skip path.
+
+    The 11 that still differ do so benignly and all compile: this tool
+    drops a `const` on a BY-VALUE parameter where the Python one keeps it,
+    it keeps a namespace-scope constant's initializer (`int X=1`) where
+    the Python one emits `const int X`, and enum member values follow #42.
+    One real fidelity gap remains there — a function-pointer `ctypedef`
+    loses its parameter names and its `shared_ptr` wrapper
+    (`void(*Fn)(PointCloud[PointXYZ], void*)` for
+    `void(*)(shared_ptr<PointCloud<PointXYZ>>, void*)`) — recorded as
+    limitation 2d.
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -535,15 +591,16 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    silently~~ — fixed by #49 (method-bearing structs promote).
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
-2c. **Foreign-namespace qualifiers survive.** `stripNamespaceQualifiers`
-   (#37/#44) removes the namespaces being emitted, not names imported
-   from elsewhere, so a shim header in `pclcompat` whose signatures
-   mention `pcl::CropBox` emits `pcl::CropBox[pcl::PointXYZ]` — `::` is
-   not Cython. The Python implementation resolves these through the
-   cimport (a qualified name whose tail is already known resolves to the
-   bare name). 17 of python-pcl_skbuild's 68 mirror headers hit this,
-   all of them `compat/` shims; it is the remaining reason that pipeline
-   cannot switch backends, alongside 2b's batch mode.
+2c. ~~Foreign-namespace qualifiers survive~~ — closed by #56; an
+   unresolvable tail now skips with a reason instead of emitting `::`.
+2d. **A function-pointer `ctypedef` loses its parameter names and any
+   template wrapper on them**: `void(*)(shared_ptr<PointCloud<PointXYZ>>,
+   void*)` emits `ctypedef void(*Fn)(PointCloud[PointXYZ], void*)`. The
+   declaration compiles but no longer states the C++ type, so a call
+   through it would be wrong. One header of python-pcl_skbuild's 68
+   (`compat/grabber_callback.h`) is affected. Batch `--config` mode
+   (2b) and this are what still keep that pipeline on the libclang
+   backend.
 2b. **No name filtering.** `--include-name` / `--exclude-name` /
    `--namespace` have no counterpart flags here, so the Python
    `--backend cppast` path refuses them rather than degrading (as it does

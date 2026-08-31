@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#55 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#56 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -58,6 +58,23 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
 - Option values are taken verbatim: `CXXOPTS_VECTOR_DELIMITER` is disabled
   in `main.cpp` because cxxopts otherwise splits a repeatable option's
   value on commas, which silently broke `cimport A, B`.
+
+## Name and spelling rules (#56)
+
+- A QUALIFIED name from another namespace resolves to its bare tail when
+  that tail is cimported or declared in the file — Cython has no
+  qualification for a cimported name, so the cimport IS the statement of
+  what the bare name means. An unknown tail is never guessed: the
+  declaration becomes a `# skipped:` comment naming the reason.
+- Never search for `const` (or any keyword) as a bare SUBSTRING.
+  `reconstruct`, `constant_value` and `const_pointer` were all corrupted
+  that way. `const<letter>` is unsplittable in principle — it cannot be
+  told from those names — so only `<type>const` is split.
+- A pxd cannot carry a default argument at all (`=*` is rejected inside
+  `cdef extern`; it is only for template parameter defaults), so C++
+  defaults expand into one declaration per callable arity.
+- Parameter names are documentation, but cython still parses them: a
+  Python keyword (`in`) gets a `_` suffix.
 
 ## Skip discipline
 

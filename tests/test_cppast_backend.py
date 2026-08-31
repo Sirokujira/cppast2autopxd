@@ -280,3 +280,56 @@ def test_empty_and_quoted_extern_from_are_refused():
         generate_pxd_cppast(
             EMIT_MODES, tool=_tool(), extern_from='a"b.h',
         )
+
+
+NAME_RES = os.path.join(
+    REPO, "cpp", "tests", "input_options", "name_resolution.h"
+)
+
+
+def test_name_resolution_rules(tmp_path):
+    """The rules that decide whether generated pxd is usable at all (#56).
+
+    A qualified name from another namespace resolves through the cimport
+    (Cython has no qualification for a cimported name, so the cimport IS
+    the statement of what the bare name means) and is skipped WITH a
+    reason when it does not; an identifier that merely contains "const"
+    survives; a Python keyword used as a parameter name is suffixed; and
+    a C++ default argument expands into one declaration per arity,
+    because a pxd cannot spell a default at all.
+    """
+    result = generate_pxd_cppast(
+        NAME_RES, tool=_tool(),
+        include_dirs=[os.path.join(REPO, "cpp", "tests", "input_options")],
+        except_plus=True,
+        extra_cimports=["from other_types cimport Widget"],
+    )
+    text = result.text
+    # identifiers containing "const"
+    assert "void reconstruct(int* out) except + nogil" in text
+    assert "int constant_value() except + nogil const" in text
+    assert "const int* const_pointer() except + nogil const" in text
+    for wrong in ("re ruct(", " ant_value(", "const _pointer("):
+        assert wrong not in text, f"{wrong!r}: the const scan split a name"
+    # qualified names: resolved when cimported, skipped when not
+    assert "void useWidget(const Widget& w) except + nogil" in text
+    assert "other::Widget" not in text
+    assert any("useGadget" in w and "does not resolve" in w
+               for w in result.warnings), result.warnings
+    # Python keyword as a parameter name
+    assert "void copyInto(const Widget& in_, Widget& out) except + nogil" in text
+    # default arguments -> one declaration per arity
+    assert "int saveWidget(const Widget& w) except + nogil" in text
+    assert "int saveWidget(const Widget& w, bool binary) except + nogil" in text
+    assert (
+        "int saveWidget(const Widget& w, bool binary, size_t precision)"
+        " except + nogil" in text
+    )
+    assert "false" not in text
+
+    (tmp_path / "other_types.pxd").write_text("cdef struct Widget:\n    int id\n")
+    _cython_ok(
+        tmp_path, "name_resolution", text,
+        "from name_resolution cimport Mesh\n"
+        "def f():\n    cdef Mesh m\n    return m.constant_value()\n",
+    )

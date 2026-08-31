@@ -544,6 +544,37 @@ public:
         // lines, and emit them first followed by the remaining body.
         std::vector<std::string> importLines;
         std::vector<std::string> importedSymbols;
+        // Every name a cimport line brings into scope. importedSymbols is the
+        // DEDUP KEY (the last token, which is all the emitter ever produces);
+        // this is the full set, because a caller's --extra_cimport may name
+        // several (`cimport PointXYZ, Normal`) and the qualified-name pass
+        // below has to know about all of them.
+        std::vector<std::string> importedNames;
+        auto recordImportedNames = [&importedNames](const std::string& imp) {
+            size_t k = imp.rfind("cimport ");
+            if(k == std::string::npos) return;
+            std::string list = imp.substr(k + 8);
+            size_t b = 0;
+            while(b <= list.size())
+            {
+                size_t e = list.find(',', b);
+                std::string name = list.substr(b, e == std::string::npos
+                                                      ? std::string::npos
+                                                      : e - b);
+                size_t f = name.find_first_not_of(" \t");
+                size_t l = name.find_last_not_of(" \t");
+                if(f != std::string::npos)
+                {
+                    name = name.substr(f, l - f + 1);
+                    // `cimport x as y` binds the ALIAS
+                    size_t as = name.rfind(" as ");
+                    if(as != std::string::npos) name = name.substr(as + 4);
+                    if(!name.empty()) importedNames.push_back(name);
+                }
+                if(e == std::string::npos) break;
+                b = e + 1;
+            }
+        };
         // --extra_cimport lines go in FIRST: the caller's statement of what a
         // sibling-header name means (`from PCLHeader cimport PCLHeader`) wins
         // the by-symbol dedup against anything the emitter derived.
@@ -555,6 +586,7 @@ public:
             {
                 importedSymbols.push_back(symbol);
                 importLines.push_back(imp);
+                recordImportedNames(imp);
             }
         }
         std::string rest;
@@ -618,6 +650,7 @@ public:
                     {
                         importedSymbols.push_back(symbol);
                         importLines.push_back(trimmed);
+                        recordImportedNames(trimmed);
                     }
                 }
                 else
@@ -877,6 +910,103 @@ public:
         //   - rvalue references (T&&): move ctors/assignment are not callable
         //     from Cython and only produce parser warnings/noise
         // Each dropped line is kept as a comment for auditability.
+        // Resolve QUALIFIED names that name another namespace's types.
+        //
+        // stripNamespaceQualifiers removes the namespaces being emitted, not
+        // names imported from elsewhere, so a shim in `pclcompat` whose
+        // signatures mention `pcl::CropBox` emitted `pcl::CropBox[pcl::PointXYZ]`
+        // — `::` is not Cython, and the whole file failed to compile. This is
+        // the C++-shim case the Python implementation resolves through the
+        // cimport: Cython has no qualification for a cimported name, so the
+        // cimport IS the statement of what the bare name means. A qualified
+        // name whose TAIL is already known — cimported (including via
+        // --extra_cimport) or declared in this file — becomes that bare name;
+        // an unknown tail is left alone for the skip pass below to comment
+        // out with a reason, never silently mangled.
+        {
+            std::vector<std::string> knownNames = importedNames;
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            // names declared HERE are equally usable bare
+            for(const auto& l : lines)
+            {
+                std::string t = l;
+                size_t p0 = 0; while(p0 < t.size() && t[p0] == ' ') p0++;
+                t = t.substr(p0);
+                static const char* heads[] = { "cdef cppclass ", "cdef struct ",
+                                               "cdef enum ", "cppclass ",
+                                               "struct ", "enum " };
+                for(const char* h : heads)
+                {
+                    size_t hl = std::char_traits<char>::length(h);
+                    if(t.compare(0, hl, h) != 0) continue;
+                    size_t b = hl, e = b;
+                    while(e < t.size() &&
+                          (std::isalnum((unsigned char)t[e]) || t[e] == '_')) e++;
+                    if(e > b) knownNames.push_back(t.substr(b, e - b));
+                    break;
+                }
+            }
+
+            auto isIdentChar = [](char c) {
+                return std::isalnum((unsigned char)c) || c == '_';
+            };
+            for(auto& l : lines)
+            {
+                // the extern header's `namespace "a::b"` string is not a type
+                if(l.find("cdef extern from") != std::string::npos) continue;
+                size_t pos;
+                while((pos = l.find("::")) != std::string::npos)
+                {
+                    // widen left over `A::B::` chains (and a leading global `::`)
+                    size_t start = pos;
+                    for(;;)
+                    {
+                        size_t b = start;
+                        while(b > 0 && isIdentChar(l[b - 1])) b--;
+                        if(b >= 2 && l.compare(b - 2, 2, "::") == 0) { start = b - 2; continue; }
+                        start = b;
+                        break;
+                    }
+                    // the tail is the identifier after the LAST `::`
+                    size_t last = pos;
+                    size_t scan = pos;
+                    while(true)
+                    {
+                        size_t e = scan + 2;
+                        while(e < l.size() && isIdentChar(l[e])) e++;
+                        if(e + 1 < l.size() && l.compare(e, 2, "::") == 0)
+                        { last = e; scan = e; continue; }
+                        last = scan;
+                        break;
+                    }
+                    size_t tb = last + 2, te = tb;
+                    while(te < l.size() && isIdentChar(l[te])) te++;
+                    std::string tail = l.substr(tb, te - tb);
+                    if(!tail.empty() &&
+                       std::find(knownNames.begin(), knownNames.end(), tail)
+                           != knownNames.end())
+                    {
+                        l = l.substr(0, start) + tail + l.substr(te);
+                        continue;
+                    }
+                    // Unknown tail: leave it for the skip pass. Rewrite the
+                    // separator so this loop terminates, using a marker the
+                    // skip pass recognises and no C++ name can contain.
+                    l = l.substr(0, last) + "\x01" + l.substr(last + 2);
+                }
+                // restore any unresolved qualifier for the skip pass's message
+                for(size_t i = 0; i < l.size(); ++i)
+                    if(l[i] == '\x01') { l.replace(i, 1, "::"); ++i; }
+            }
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
         {
             auto hasIdentFrom = [](const std::string& s,
                                    const char* const* deny, size_t n) -> bool {
@@ -965,6 +1095,10 @@ public:
                         why = "operator overload not supported in Cython";
                     else if(body_t.find("&&") != std::string::npos)
                         why = "rvalue references not supported in Cython";
+                    else if(body_t.rfind("#", 0) != 0 &&
+                            body_t.find("::") != std::string::npos)
+                        why = "qualified name from another namespace does not "
+                              "resolve (cimport it, e.g. --extra_cimport)";
                 }
                 if(why)
                 {
@@ -1190,6 +1324,153 @@ public:
                 }
             }
 
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
+        // C++ DEFAULT ARGUMENTS expand into overloads.
+        //
+        // A pxd cannot carry a default: `bool binary_mode=false` is a syntax
+        // error, and `=*` — the .pyx spelling — is rejected inside `cdef
+        // extern` too (probed against the compiler; it is only for template
+        // parameter defaults). The libclang emitter answers this by emitting
+        // one declaration per callable arity, and so does this pass, so a
+        // caller can still omit the defaulted arguments.
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            std::vector<std::string> out;
+            for(const auto& l : lines)
+            {
+                std::string t = l;
+                size_t ind = 0;
+                while(ind < t.size() && (t[ind]==' '||t[ind]=='\t')) ++ind;
+                std::string body = t.substr(ind);
+                if(body.empty() || body[0]=='#' || body.back()==':' ||
+                   body.rfind("ctypedef",0)==0 || body.rfind("cdef ",0)==0 ||
+                   body.rfind("from ",0)==0 || body.rfind("cimport ",0)==0)
+                { out.push_back(l); continue; }
+                size_t open_ = findParamListOpen(body);
+                if(open_ == std::string::npos) { out.push_back(l); continue; }
+                // matching close paren of the parameter list
+                int depth = 0; size_t close_ = std::string::npos;
+                for(size_t i = open_; i < body.size(); ++i)
+                {
+                    if(body[i]=='(') depth++;
+                    else if(body[i]==')') { if(--depth==0) { close_=i; break; } }
+                }
+                if(close_ == std::string::npos) { out.push_back(l); continue; }
+                std::string head = body.substr(0, open_ + 1);
+                std::string tail = body.substr(close_);          // ") nogil const"
+                std::string params = body.substr(open_ + 1, close_ - open_ - 1);
+                // split on TOP-LEVEL commas
+                std::vector<std::string> parts;
+                {
+                    int d = 0; size_t b = 0;
+                    for(size_t i = 0; i <= params.size(); ++i)
+                    {
+                        if(i == params.size() || (params[i]==',' && d==0))
+                        { parts.push_back(params.substr(b, i-b)); b = i+1; }
+                        else if(params[i]=='('||params[i]=='['||params[i]=='<') d++;
+                        else if(params[i]==')'||params[i]==']'||params[i]=='>') { if(d) d--; }
+                    }
+                }
+                // strip a top-level default from each part; note the first one
+                size_t firstDefault = parts.size();
+                for(size_t i = 0; i < parts.size(); ++i)
+                {
+                    int d = 0;
+                    for(size_t k = 0; k < parts[i].size(); ++k)
+                    {
+                        char c = parts[i][k];
+                        if(c=='('||c=='['||c=='<') d++;
+                        else if(c==')'||c==']'||c=='>') { if(d) d--; }
+                        else if(c=='=' && d==0)
+                        {
+                            if(k+1 < parts[i].size() && parts[i][k+1]=='=') break;
+                            if(k>0 && std::string("<>!+-*/%&|^=").find(parts[i][k-1])
+                                          != std::string::npos) break;
+                            parts[i] = parts[i].substr(0, k);
+                            while(!parts[i].empty() &&
+                                  (parts[i].back()==' '||parts[i].back()=='\t'))
+                                parts[i].pop_back();
+                            if(i < firstDefault) firstDefault = i;
+                            break;
+                        }
+                    }
+                }
+                if(firstDefault == parts.size()) { out.push_back(l); continue; }
+                for(size_t n = firstDefault; n <= parts.size(); ++n)
+                {
+                    std::string joined;
+                    for(size_t i = 0; i < n; ++i)
+                    {
+                        if(i) joined += ",";
+                        joined += parts[i];
+                    }
+                    // a trailing empty parameter list must not keep a stray space
+                    size_t f = joined.find_first_not_of(" \t");
+                    joined = (f == std::string::npos) ? "" : joined.substr(f);
+                    out.push_back(std::string(ind, ' ') + head + joined + tail);
+                }
+            }
+            rest.clear();
+            for(const auto& l : out) { rest += l; rest += "\n"; }
+        }
+
+        // PYTHON KEYWORDS used as parameter names.
+        //
+        // Names in an extern declaration are documentation, but cython still
+        // parses them, and legal C++ names like `in` (pcl's transform shims)
+        // are Python keywords: `transformCloud(const PointCloud[PointXYZ]& in,`
+        // was a syntax error. Suffix with `_`, as the libclang emitter does.
+        {
+            static const char* kw[] = {
+                "False","None","True","and","as","assert","async","await",
+                "break","class","continue","def","del","elif","else","except",
+                "finally","for","from","global","if","import","in","is",
+                "lambda","nonlocal","not","or","pass","raise","return","try",
+                "while","with","yield"};
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            for(auto& l : lines)
+            {
+                std::string body = l;
+                size_t ind = 0;
+                while(ind < body.size() && (body[ind]==' '||body[ind]=='\t')) ++ind;
+                std::string t = body.substr(ind);
+                if(t.empty() || t[0]=='#' || t.rfind("from ",0)==0 ||
+                   t.rfind("cimport ",0)==0 || t.find("cdef extern from")!=std::string::npos)
+                    continue;
+                size_t open_ = findParamListOpen(t);
+                if(open_ == std::string::npos) continue;
+                // a parameter NAME is the identifier just before `,` or `)`
+                std::string outp = t;
+                for(size_t i = outp.size(); i-- > open_;)
+                {
+                    if(outp[i] != ',' && outp[i] != ')') continue;
+                    size_t e = i;
+                    while(e > open_ && (outp[e-1]==' '||outp[e-1]=='\t')) e--;
+                    size_t b = e;
+                    while(b > open_ &&
+                          (std::isalnum((unsigned char)outp[b-1]) || outp[b-1]=='_')) b--;
+                    if(b == e) continue;
+                    // must be a NAME, i.e. preceded by whitespace after a type
+                    if(b == open_ || !(outp[b-1]==' '||outp[b-1]=='\t')) continue;
+                    std::string name = outp.substr(b, e-b);
+                    for(const char* k : kw)
+                        if(name == k) { outp.insert(e, "_"); break; }
+                }
+                if(outp != t) l = std::string(ind, ' ') + outp;
+            }
             rest.clear();
             for(const auto& l : lines) { rest += l; rest += "\n"; }
         }
@@ -1732,18 +2013,29 @@ private:
     {
         // `<letter>const`  -> `<letter> const`   (e.g. voidconst, Pointconst)
         // `const<letter>`  -> `const <letter>`   (e.g. constvoid)
-        for(std::string::size_type i = s.find("const"); i != std::string::npos; i = s.find("const", i + 1))
+        // The scan must respect WORD BOUNDARIES. Searching for "const" anywhere
+        // corrupted every identifier that merely contains it: `reconstruct`
+        // became `re ruct` (a space either side, then dropValueParamConst ate
+        // the middle), `constant_value` became `ant_value`, `const_pointer`
+        // became `const _pointer` — silently, in output cython then rejected.
+        // Only a glued KEYWORD is split, i.e. exactly one side is an
+        // identifier character; both sides means we are inside a longer name.
+        auto identChar = [](char c) {
+            return std::isalnum((unsigned char)c) != 0 || c == '_';
+        };
+        for(std::string::size_type i = s.find("const"); i != std::string::npos;
+            i = s.find("const", i + 1))
         {
-            if(i > 0 && (std::isalnum((unsigned char)s[i-1]) || s[i-1] == '_'))
-            {
-                s.insert(i, " ");
-                i++; // skip the inserted space
-            }
-            std::string::size_type after = i + 5; // length of "const"
-            if(after < s.size() && (std::isalnum((unsigned char)s[after]) || s[after] == '_'))
-            {
-                s.insert(after, " ");
-            }
+            bool prevIdent = i > 0 && identChar(s[i - 1]);
+            bool nextIdent = i + 5 < s.size() && identChar(s[i + 5]);
+            // Only the `<type>const` direction is splittable. `const<letter>`
+            // is genuinely ambiguous — `constvoid` and `constant_value` /
+            // `const_pointer` / `constructor` look identical from here — and
+            // splitting it corrupted the names: `constant_value` became
+            // `const ant_value` and then, via dropValueParamConst, `ant_value`.
+            // libclang prints the keyword before the type with a separator, so
+            // there is nothing real to recover on that side.
+            if(prevIdent && !nextIdent) { s.insert(i, " "); i++; }
         }
         // `)const` -> `) const`
         myReplace(s, ")const", ") const");

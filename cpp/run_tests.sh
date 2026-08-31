@@ -220,6 +220,56 @@ else
   status=1
 fi
 
+# --- name-resolution block (gating): the rules that decide whether the
+# generated pxd is usable at all (#56). One fixture, one config, checked by
+# content and then by cython with a stand-in sibling pxd on the path.
+if [[ -f "$ROOT/tests/input_options/name_resolution.h" ]]; then
+  name="name_resolution"
+  NR="$OUT/name_resolution"; mkdir -p "$NR"
+  if "$TOOL" --output_dir "$NR" --xml_dir "" --std "$STD" \
+        -I "$ROOT/tests/input_options" --except_plus \
+        --config "$ROOT/tests/configs/name_resolution.conf" \
+        "$ROOT/tests/input_options/name_resolution.h" >"$NR/gen.log" 2>&1; then
+    f="$NR/name_resolution.pxd"; bad=""
+    # an identifier that merely CONTAINS "const" must survive intact
+    grep -q 'void reconstruct(int\* out) except + nogil$' "$f" || bad="$bad reconstruct"
+    grep -q 'int constant_value() except + nogil const$' "$f" || bad="$bad constant_value"
+    grep -q 'const int\* const_pointer() except + nogil const$' "$f" || bad="$bad const_pointer"
+    # a qualified name from another namespace resolves when cimported...
+    grep -q 'void useWidget(const Widget& w) except + nogil$' "$f" || bad="$bad resolve-cimported"
+    grep -q 'other::Widget' "$f" && bad="$bad unresolved-Widget"
+    # ...and is SKIPPED WITH A REASON when it is not (never silent)
+    grep -q '# skipped: void useGadget(const other::Gadget& g).*does not resolve' "$f" \
+      || bad="$bad skip-unresolvable"
+    # a Python keyword used as a parameter name is suffixed
+    grep -q 'void copyInto(const Widget& in_, Widget& out) except + nogil$' "$f" || bad="$bad keyword-param"
+    # C++ default arguments expand into one declaration per arity
+    grep -q 'int saveWidget(const Widget& w) except + nogil$' "$f" || bad="$bad default-arity-1"
+    grep -q 'int saveWidget(const Widget& w, bool binary) except + nogil$' "$f" || bad="$bad default-arity-2"
+    grep -q 'int saveWidget(const Widget& w, bool binary, size_t precision) except + nogil$' "$f" \
+      || bad="$bad default-arity-3"
+    grep -q '=false\|= false\|=8\|= 8' "$f" && bad="$bad default-value-leaked"
+    if [[ -n "$bad" ]]; then
+      printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
+    elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
+      # same availability guard as cython_check
+      printf 'cdef struct Widget:\n    int id\n' > "$NR/other_types.pxd"
+      if ( cd "$NR" && "$CYTHON" --cplus name_resolution.pxd ) >"$NR/cython.log" 2>&1; then
+        printf 'OK    %-24s resolve/skip/keyword/defaults  [cython OK]\n' "$name"
+      else
+        printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$NR/cython.log"; status=1
+      fi
+    else
+      printf 'OK    %-24s resolve/skip/keyword/defaults  [cython skipped]\n' "$name"
+    fi
+  else
+    printf 'NG    %-24s generation failed\n' "$name"; status=1
+  fi
+else
+  printf 'NG    %-24s tests/input_options/name_resolution.h missing\n' "name_resolution"
+  status=1
+fi
+
 # --- real-PCL sweep (auto-skips without a PCL install; gates with one) -----
 # -f, not -x: the script is invoked through `bash`, so a checkout that drops
 # the exec bit (Windows, zip export, core.fileMode=false) must not silently
