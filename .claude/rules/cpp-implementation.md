@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#33 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#57 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -37,6 +37,50 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
 - Fixture policy: committed `tests/input/*.h` are gating; subdirectories
   (`tests/input/draco/` etc.) are fetched real-world samples and
   informational. New behaviors get a committed, self-contained fixture.
+
+## Emitter modes
+
+- `--extern_from` / `--except_plus` / `--no_nogil` are the counterparts of
+  the Python emitter's `extern_from` / `except_plus` / `nogil`, and are
+  what lets this tool serve python-pcl_skbuild's pipeline through the
+  delegation backend. `extern_from` is also a config key, single-valued:
+  a duplicate is a located error and the command-line flag wins.
+- `except +` placement is compiler-proven, not guessed (#54):
+  `except + nogil const` is the ONLY accepted spelling of a const method
+  (`const except +`, `except + const` and `const nogil` are syntax
+  errors), so under `--no_nogil` the const is dropped. A non-const `T&`
+  return never takes `except +` — cython's try/catch stores a by-value
+  temporary, so the caller would get a reference to a copy.
+- Two traps the pass shape invites (#55): by this point templates are
+  already `[...]`, so a `<` in a declaration is an OPERATOR NAME, never a
+  bracket; and a `(` immediately followed by `*` is a function-pointer
+  DECLARATOR, not a parameter list.
+- Option values are taken verbatim: `CXXOPTS_VECTOR_DELIMITER` is disabled
+  in `main.cpp` because cxxopts otherwise splits a repeatable option's
+  value on commas, which silently broke `cimport A, B`.
+
+## Name and spelling rules (#56)
+
+- A QUALIFIED name from another namespace resolves to its bare tail when
+  that tail is cimported or declared in the file — Cython has no
+  qualification for a cimported name, so the cimport IS the statement of
+  what the bare name means. An unknown tail is never guessed: the
+  declaration becomes a `# skipped:` comment naming the reason.
+- Never search for `const` (or any keyword) as a bare SUBSTRING.
+  `reconstruct`, `constant_value` and `const_pointer` were all corrupted
+  that way. `const<letter>` is unsplittable in principle — it cannot be
+  told from those names — so only `<type>const` is split.
+- A pxd cannot carry a default argument at all (`=*` is rejected inside
+  `cdef extern`; it is only for template parameter defaults), so C++
+  defaults expand into one declaration per callable arity.
+- Parameter names are documentation, but cython still parses them: a
+  Python keyword (`in`) gets a `_` suffix — and so does a DATA MEMBER
+  named that way, which is an "Empty declarator" all the same.
+- Resolution needs a leading qualifier NAME. After the angle->square pass a
+  dependent name reads `vector[int]::iterator`; there is nothing to strip,
+  so it skips. And a name the emitter GLUED (`shared_ptrpcl::X`) must be
+  fixed where it is glued, never resolved — resolving it yields a pxd
+  cython accepts and the C++ compiler rejects (#57).
 
 ## Skip discipline
 
