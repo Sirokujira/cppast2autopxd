@@ -19,10 +19,15 @@ which is what lets this backend produce the declarations
 python-pcl_skbuild's pipeline needs: mirror header in, real PCL include
 path out, C++ exceptions propagating.
 
+``namespaces`` maps onto ``--namespace`` with the same exact-match
+semantics as this package's filter (FEASIBILITY #58), which is what lets
+:func:`cppast2autopxd.run_config` drive a whole config through this
+backend.
+
 Differences a caller must know (they raise, never silently degrade):
 
-- name filtering (``namespaces``/``include_names``/``exclude_names``),
-  ``macros`` and custom banners have no counterpart flags.
+- ``include_names`` / ``exclude_names``, ``macros``, ``extra_args``,
+  ``compile_db``, C mode and pyx scaffolding have no counterpart.
 
 Discovery is environment-driven (never a hard-coded path):
 ``CPPAST2AUTOPXD_CPP_TOOL``, then ``cppast-autopxd`` on PATH, then the
@@ -75,6 +80,7 @@ def generate_pxd_cppast(
     extern_from: Optional[str] = None,
     nogil: bool = True,
     except_plus: bool = False,
+    namespaces: Optional[List[str]] = None,
 ) -> GenerationResult:
     """Generate pxd text for one header through the cppast_autopxd binary.
 
@@ -118,6 +124,12 @@ def generate_pxd_cppast(
             argv.append("--no_nogil")
         if except_plus:
             argv.append("--except_plus")
+        for ns in namespaces or []:
+            # exact-match filter, like this package's own `namespaces`:
+            # "pcl" keeps `namespace "pcl"` blocks only, not `pcl::io`.
+            # "" (the file-level block) is spelled `::` on the command line
+            # because an empty argument does not survive the option parser.
+            argv += ["--namespace", ns or "::"]
         argv.append(header)
 
         proc = subprocess.run(argv, capture_output=True, text=True)

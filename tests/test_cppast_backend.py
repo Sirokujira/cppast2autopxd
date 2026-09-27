@@ -203,9 +203,9 @@ def test_cli_still_refuses_what_the_backend_cannot_do(capsys, monkeypatch):
     from cppast2autopxd.cli import main
 
     monkeypatch.setenv("CPPAST2AUTOPXD_CPP_TOOL", _tool())
-    for flag in (["--namespace", "demo"], ["--include-name", "Store"],
-                 ["--exclude-name", "Store"], ["--no-macros"],
-                 ["--language", "c"]):
+    # (--namespace left this list in #58: it maps onto the tool's flag now)
+    for flag in (["--include-name", "Store"], ["--exclude-name", "Store"],
+                 ["--no-macros"], ["--language", "c"]):
         assert main([EMIT_MODES, "--backend", "cppast"] + flag) == 2
         assert "cannot honor" in capsys.readouterr().err
 
@@ -352,3 +352,191 @@ def test_name_resolution_rules(tmp_path):
         "from name_resolution cimport Mesh\n"
         "def f():\n    cdef Mesh m\n    return m.constant_value()\n",
     )
+
+
+NAMESPACES_H = os.path.join(
+    REPO, "cpp", "tests", "input_options", "namespaces.h"
+)
+MINI_PCL = os.path.join(REPO, "tests", "headers", "mini_pcl")
+
+
+def _mini_pcl_config(tmp_path, extra=""):
+    """The same two-header mini_pcl config test_config_and_cli.py drives
+    through libclang, so both backends can be run over one config."""
+    import textwrap
+    from pathlib import Path
+
+    headers = Path(MINI_PCL).as_posix()
+    cfg = tmp_path / "pxdgen.toml"
+    cfg.write_text(textwrap.dedent(f"""
+        [generator]
+        std = "c++14"
+        include_dirs = ["{headers}"]
+
+        [[headers]]
+        path = "{headers}/pcl/point_types.h"
+        extern_from = "pcl/point_types.h"
+        output = "out/point_types.pxd"
+        namespaces = ["pcl"]
+
+        [[headers]]
+        path = "{headers}/pcl/point_cloud.h"
+        extern_from = "pcl/point_cloud.h"
+        output = "out/point_cloud.pxd"
+        namespaces = ["pcl"]
+        {extra}
+    """))
+    return str(cfg)
+
+
+def test_namespaces_filter_is_exact_match(tmp_path):
+    """`namespaces` maps onto --namespace with the Python filter's exact
+    semantics: "a" keeps the `a` block only (not nested `a::b`, not the
+    file-level one); "" keeps the file-level block."""
+    only_a = generate_pxd_cppast(
+        NAMESPACES_H, tool=_tool(), namespaces=["a"]
+    ).text
+    assert only_a.count("cdef extern from") == 1
+    assert 'namespace "a":' in only_a
+    assert 'namespace "a::b"' not in only_a
+    assert "global_count" not in only_a
+
+    only_global = generate_pxd_cppast(
+        NAMESPACES_H, tool=_tool(), namespaces=[""]
+    ).text
+    assert only_global.count("cdef extern from") == 1
+    assert "int global_count()" in only_global
+    assert 'namespace "' not in only_global
+
+    # an IMPORT is never dropped with a block: `c` is the only user of
+    # vector, and the emitter interleaves that cimport with an earlier
+    # block — five real compat shims lost theirs and stopped compiling
+    only_c = generate_pxd_cppast(
+        NAMESPACES_H, tool=_tool(), namespaces=["c"]
+    ).text
+    assert "from libcpp.vector cimport vector\n" in only_c
+    assert "vector[int] other_ids(const Other& o)" in only_c
+    _cython_ok(
+        tmp_path, "namespaces_c", only_c.replace('"namespaces.h"', '"namespaces_c.h"'),
+        "from namespaces_c cimport Other\n"
+        "def g():\n    cdef Other o\n    return o.x\n",
+    )
+
+    a_and_c = generate_pxd_cppast(
+        NAMESPACES_H, tool=_tool(), namespaces=["a", "c"]
+    ).text
+    assert a_and_c.count("cdef extern from") == 2
+    _cython_ok(
+        tmp_path, "namespaces", a_and_c,
+        "from namespaces cimport Outer\n"
+        "def f():\n    cdef Outer o\n    return o.v\n",
+    )
+
+
+def test_run_config_through_cppast_backend(tmp_path):
+    """Batch --config mode drives every job through the cppast backend and
+    writes the same files the libclang path does — the last thing that
+    kept a whole-config pipeline on libclang (#58)."""
+    from cppast2autopxd import load_config, run_config
+
+    monkey = os.environ.get("CPPAST2AUTOPXD_CPP_TOOL")
+    os.environ["CPPAST2AUTOPXD_CPP_TOOL"] = _tool()
+    try:
+        cfg = load_config(_mini_pcl_config(tmp_path))
+        warnings = run_config(cfg, verbose=False, backend="cppast")
+    finally:
+        if monkey is None:
+            os.environ.pop("CPPAST2AUTOPXD_CPP_TOOL", None)
+        else:
+            os.environ["CPPAST2AUTOPXD_CPP_TOOL"] = monkey
+    assert warnings == []
+    pt = (tmp_path / "out" / "point_types.pxd").read_text()
+    pc = (tmp_path / "out" / "point_cloud.pxd").read_text()
+    assert 'cdef extern from "pcl/point_types.h" namespace "pcl"' in pt
+    assert "cdef struct PointXYZ:" in pt
+    assert 'cdef extern from "pcl/point_cloud.h" namespace "pcl"' in pc
+    assert "except +" in pc            # the config's default, not the tool's
+    # both files compile together, as the pipeline needs them to
+    out = tmp_path / "out"
+    (out / "__init__.pxd").write_text("")
+    pyx = tmp_path / "use_both.pyx"
+    pyx.write_text(
+        "from out.point_types cimport PointXYZ\n"
+        "from out.point_cloud cimport PointCloud\n"
+        "def f():\n    cdef PointCloud[PointXYZ] c\n    return c.size()\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "cython", "--cplus", "-3",
+         "-I", str(tmp_path), str(pyx)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_both_backends_agree_on_the_mini_pcl_config(tmp_path):
+    """The two-backend parity gate: one config, both backends, and every
+    declaration line the libclang path emits must come out of the cppast
+    path too (cimport order and the block-level vs per-function `nogil`
+    spelling are the known cosmetic differences)."""
+    from cppast2autopxd import load_config, run_config
+
+    lib_dir = tmp_path / "lib"; lib_dir.mkdir()
+    cpp_dir = tmp_path / "cpp"; cpp_dir.mkdir()
+    run_config(load_config(_mini_pcl_config(lib_dir)), verbose=False)
+    monkey = os.environ.get("CPPAST2AUTOPXD_CPP_TOOL")
+    os.environ["CPPAST2AUTOPXD_CPP_TOOL"] = _tool()
+    try:
+        run_config(load_config(_mini_pcl_config(cpp_dir)), verbose=False,
+                   backend="cppast")
+    finally:
+        if monkey is None:
+            os.environ.pop("CPPAST2AUTOPXD_CPP_TOOL", None)
+        else:
+            os.environ["CPPAST2AUTOPXD_CPP_TOOL"] = monkey
+
+    def decls(path):
+        # Canonical form for the comparison. The two known cosmetic
+        # differences (#54): libclang puts `nogil` on the extern BLOCK and
+        # drops `const` under `except +`; the cppast tool spells it per
+        # function as `except + nogil const`. Both are valid Cython, so
+        # `nogil` goes everywhere and a `const` after `except +` with it.
+        lines = []
+        for l in path.read_text().splitlines():
+            t = l.rstrip()
+            if not t or t.startswith("#") or t.lstrip().startswith(("from ", "cimport ")):
+                continue
+            t = t.replace('" nogil:', '":').replace(" nogil", "")
+            if t.endswith("except + const"):
+                t = t[: -len(" const")]
+            lines.append(t)
+        return lines
+
+    for name in ("point_types.pxd", "point_cloud.pxd"):
+        lib = decls(lib_dir / "out" / name)
+        cpp = decls(cpp_dir / "out" / name)
+        missing = [l for l in lib if l not in cpp]
+        assert not missing, f"{name}: cppast backend lacks {missing}"
+
+
+def test_run_config_refuses_what_cppast_cannot_do(tmp_path):
+    """A job with an option the backend has no flag for is a loud error
+    naming the job and the option — never a silent libclang fall-back."""
+    from cppast2autopxd import load_config, run_config
+
+    cfg = load_config(_mini_pcl_config(
+        tmp_path, extra='include = ["PointCloud"]'
+    ))
+    os.environ["CPPAST2AUTOPXD_CPP_TOOL"] = _tool()
+    with pytest.raises(ValueError, match="point_cloud.h.*cannot honor include"):
+        run_config(cfg, verbose=False, backend="cppast")
+    assert not (tmp_path / "out" / "point_cloud.pxd").exists()
+
+
+def test_cli_config_mode_with_cppast_backend(tmp_path, monkeypatch):
+    from cppast2autopxd.cli import main
+
+    monkeypatch.setenv("CPPAST2AUTOPXD_CPP_TOOL", _tool())
+    rc = main(["--config", _mini_pcl_config(tmp_path), "--backend", "cppast"])
+    assert rc == 0
+    assert (tmp_path / "out" / "point_types.pxd").exists()
+    assert (tmp_path / "out" / "point_cloud.pxd").exists()

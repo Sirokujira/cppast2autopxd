@@ -291,6 +291,63 @@ else
   status=1
 fi
 
+# --- namespace block (gating): --namespace, exact-match (#58) ------------
+# One fixture with a file-level declaration, `a`, nested `a::b` and `c`.
+# Checked by content: "a" must keep exactly the `a` block (not `a::b`, not
+# the file-level one), `::` must keep exactly the file-level block, and the
+# config-key route must agree with the flag.
+if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
+  name="namespaces"
+  NS="$OUT/namespaces"; mkdir -p "$NS/a" "$NS/global" "$NS/conf" "$NS/c"
+  printf 'namespace = a\nnamespace = c\n' > "$NS/ac.conf"
+  if "$TOOL" --output_dir "$NS/a" --xml_dir "" --std "$STD" --namespace a \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/a.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/c" --xml_dir "" --std "$STD" --namespace c \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/c.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/global" --xml_dir "" --std "$STD" --namespace :: \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/global.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/conf" --xml_dir "" --std "$STD" --config "$NS/ac.conf" \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/conf.log" 2>&1; then
+    a="$NS/a/namespaces.pxd"; g="$NS/global/namespaces.pxd"; c="$NS/conf/namespaces.pxd"
+    bad=""
+    [[ "$(grep -c '^cdef extern from' "$a")" == 1 ]] || bad="$bad a-block-count"
+    grep -q 'namespace "a":$' "$a" || bad="$bad a-kept"
+    grep -q 'namespace "a::b"' "$a" && bad="$bad a-nested-leaked"
+    grep -q 'int global_count' "$a" && bad="$bad a-global-leaked"
+    [[ "$(grep -c '^cdef extern from' "$g")" == 1 ]] || bad="$bad global-block-count"
+    grep -q 'int global_count() nogil$' "$g" || bad="$bad global-kept"
+    grep -q 'namespace "' "$g" && bad="$bad global-namespaced-leaked"
+    [[ "$(grep -c '^cdef extern from' "$c")" == 2 ]] || bad="$bad conf-block-count"
+    grep -q 'namespace "a":$' "$c" && grep -q 'namespace "c":$' "$c" || bad="$bad conf-a-c"
+    grep -q 'namespace "a::b"' "$c" && bad="$bad conf-nested-leaked"
+    # an IMPORT line is never dropped with a block: `c` uses vector, and the
+    # emitter interleaved that cimport with an earlier (dropped) block
+    cc="$NS/c/namespaces.pxd"
+    grep -q '^from libcpp.vector cimport vector$' "$cc" || bad="$bad c-lost-cimport"
+    grep -q 'vector\[int\] other_ids(const Other& o) nogil$' "$cc" || bad="$bad c-kept"
+    [[ "$(grep -c '^cdef extern from' "$cc")" == 1 ]] || bad="$bad c-block-count"
+    if [[ -n "$bad" ]]; then
+      printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
+    elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
+      ok=1
+      for d in "$NS/a" "$NS/global" "$NS/conf" "$NS/c"; do
+        ( cd "$d" && "$CYTHON" --cplus namespaces.pxd ) >"$d/cython.log" 2>&1 || ok=0
+      done
+      if [[ $ok -eq 1 ]]; then
+        printf 'OK    %-24s a / c / global / a+c via config  [cython OK]\n' "$name"
+      else
+        printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$NS"; status=1
+      fi
+    else
+      printf 'OK    %-24s a / c / global / a+c via config  [cython skipped]\n' "$name"
+    fi
+  else
+    printf 'NG    %-24s generation failed\n' "$name"; status=1
+  fi
+else
+  printf 'NG    %-24s tests/input_options/namespaces.h missing\n' "namespaces"; status=1
+fi
+
 # --- real-PCL sweep (auto-skips without a PCL install; gates with one) -----
 # -f, not -x: the script is invoked through `bash`, so a checkout that drops
 # the exec bit (Windows, zip export, core.fileMode=false) must not silently

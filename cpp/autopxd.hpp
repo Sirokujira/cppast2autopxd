@@ -111,6 +111,11 @@ private:
     bool emitNogil = true;
     bool emitExceptPlus = false;
 
+    // --namespace: keep only the `cdef extern from ... namespace "X"` blocks
+    // whose X is listed (exact match, like the Python filter: "pcl" does not
+    // cover "pcl::io"; "" is the file-level block). Empty = keep everything.
+    std::vector<std::string> allowedNamespaces;
+
     // Template type-parameter names of the function template currently being
     // entered. cppast represents a free function template as a
     // function_template_t proxy wrapping the real function_t; the proxy carries
@@ -155,9 +160,11 @@ public:
     AutoPxd(const std::string& filename, const std::string& output_folder = ".", const std::string& xml_folder = "",
             const std::vector<std::string>& extra_cimports = {},
             const std::vector<std::string>& typemap_substitutions = {},
-            const std::string& extern_from = "", bool emit_nogil = true, bool emit_except_plus = false)
+            const std::string& extern_from = "", bool emit_nogil = true, bool emit_except_plus = false,
+            const std::vector<std::string>& allowed_namespaces = {})
         : extraCimports(extra_cimports), typemapSubstitutions(typemap_substitutions),
-          externFromOverride(extern_from), emitNogil(emit_nogil), emitExceptPlus(emit_except_plus)
+          externFromOverride(extern_from), emitNogil(emit_nogil), emitExceptPlus(emit_except_plus),
+          allowedNamespaces(allowed_namespaces)
     {
         // そのまま設定すると、絶対パスになるため
         // 相対パスとして設定すること。
@@ -535,6 +542,59 @@ public:
                     body += lines;
                 }
             }
+        }
+
+        // --namespace: drop every extern block the caller did not ask for.
+        // A config entry states which namespace a pxd is FOR (python-pcl_skbuild
+        // writes `namespaces = ["pcl::io"]` for pcd_io.h), and the Python
+        // filter is an EXACT match on the block's full name — so "pcl" keeps
+        // `namespace "pcl"` only, "pcl::io" keeps the nested block, and "" the
+        // file-level one. This runs before import hoisting, and IMPORT LINES
+        // ARE NEVER DROPPED: the emitter interleaves a `from ... cimport ...`
+        // with whichever block happens to be open when the include or the
+        // first reference is seen, not with the block that needs it — five of
+        // python-pcl_skbuild's compat shims lost their `vector` / `string` /
+        // `shared_ptr` cimport with the file-level block and stopped
+        // compiling. Hoisting dedups, and an unused cimport is harmless.
+        if(!allowedNamespaces.empty())
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(body);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            auto blockNamespace = [](const std::string& hdr) -> std::string {
+                size_t k = hdr.find(" namespace \"");
+                if(k == std::string::npos) return std::string();     // file-level
+                size_t b = k + 12, e = hdr.find('"', b);
+                return e == std::string::npos ? std::string() : hdr.substr(b, e - b);
+            };
+            bool keep = true;
+            std::string filtered;
+            for(const auto& l : lines)
+            {
+                bool isHeader = l.rfind("cdef extern from", 0) == 0 &&
+                                !l.empty() && l.back() == ':';
+                if(isHeader)
+                {
+                    std::string ns = blockNamespace(l);
+                    keep = std::find(allowedNamespaces.begin(), allowedNamespaces.end(), ns)
+                           != allowedNamespaces.end();
+                }
+                else if(!l.empty() && l[0] != ' ' && l[0] != '\t')
+                {
+                    // any other top-level line ends the block it followed
+                    keep = true;
+                }
+                std::string t = l;
+                t.erase(0, t.find_first_not_of(" \t"));
+                bool isImport = (t.rfind("from ", 0) == 0 &&
+                                 t.find(" cimport ") != std::string::npos)
+                                || t.rfind("cimport ", 0) == 0;
+                if(keep || isImport) { filtered += l; filtered += "\n"; }
+            }
+            body = filtered;
         }
 
         // Cython requires `from ... cimport ...` / `cimport ...` at module

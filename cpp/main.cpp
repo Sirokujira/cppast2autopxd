@@ -234,7 +234,7 @@ parse_file(const cppast::libclang_compile_config& config, const cppast::diagnost
 static bool
 load_config_file(const std::string& path, std::vector<std::string>& extra_cimports,
                  std::vector<std::string>& typemap_substitutions,
-                 std::string& extern_from) {
+                 std::string& extern_from, std::vector<std::string>& namespaces) {
   std::ifstream in(path);
   if (!in) {
     print_error("cannot open config file '" + path + "'");
@@ -277,6 +277,8 @@ load_config_file(const std::string& path, std::vector<std::string>& extra_cimpor
       extra_cimports.push_back(value);
     else if (key == "typemap")
       typemap_substitutions.push_back(value);
+    else if (key == "namespace")
+      namespaces.push_back(value);   // "" is legal here: it means the file-level block
     else if (key == "extern_from") {
       // Unlike the repeatable keys this one is a single value, so a second
       // entry would silently win: say which line collides instead.
@@ -296,7 +298,7 @@ load_config_file(const std::string& path, std::vector<std::string>& extra_cimpor
       // the parse config, which is already built by the time this runs.
       print_error("config " + path + ":" + std::to_string(lineno) +
                   ": unknown key '" + key +
-                  "' (expected extra_cimport, typemap or extern_from)");
+                  "' (expected extra_cimport, typemap, namespace or extern_from)");
       return false;
     }
   }
@@ -367,12 +369,14 @@ main(int argc, char* argv[]) try {
          cxxopts::value<std::vector<std::string>>())
         ("typemap", "substitute a type name in the generated pxd, FROM=TO with word-boundary matching (repeatable), e.g. \"uindex_t=uint32_t\" — the counterpart of the Python implementation's typemap substitutions",
          cxxopts::value<std::vector<std::string>>())
-        ("config", "read repeatable options from a file: lines of `key = value` where key is extra_cimport, typemap or extern_from (blank lines and whole-line #-comments ignored; a '#' inside a value is an error, since it is the comment marker). Repeatable; entries APPEND to any given on the command line",
+        ("config", "read repeatable options from a file: lines of `key = value` where key is extra_cimport, typemap, namespace or extern_from (blank lines and whole-line #-comments ignored; a '#' inside a value is an error, since it is the comment marker). Repeatable; entries APPEND to any given on the command line",
          cxxopts::value<std::vector<std::string>>())
         ("extern_from", "write PATH into the generated `cdef extern from \"...\"` line instead of the parsed file's name, for pxd generated from a self-contained mirror header whose real counterpart the C++ compiler must include (e.g. \"pcl/point_cloud.h\") — the counterpart of the Python implementation's extern_from. Also settable as an `extern_from = ` config key; unlike the repeatable keys (which append) that one is single-valued and LOSES to this flag",
          cxxopts::value<std::string>())
         ("except_plus", "append `except +` to functions, methods and constructors so a C++ exception propagates as a Python one instead of terminating; mutable-reference returns are exempt (Cython would hand out a reference to a temporary). The counterpart of the Python implementation's except_plus")
-        ("no_nogil", "do not append `nogil` to functions and methods (the counterpart of the Python implementation's nogil = false); `nogil` is emitted by default");
+        ("no_nogil", "do not append `nogil` to functions and methods (the counterpart of the Python implementation's nogil = false); `nogil` is emitted by default")
+        ("namespace", "keep only the `cdef extern from ... namespace \"X\"` blocks whose X is given (repeatable; exact match, like the Python implementation's namespaces filter: \"pcl\" keeps `pcl` but not `pcl::io`, the file-level block is `::` or an empty value). Also a repeatable `namespace = ` config key. Without it every block is kept",
+         cxxopts::value<std::vector<std::string>>());
   // clang-format on
   option_list.parse_positional("file");
 
@@ -479,10 +483,23 @@ main(int argc, char* argv[]) try {
       typemap_substitutions = options["typemap"].as<std::vector<std::string>>();
     // config-file entries APPEND to command-line ones (never replace them)
     std::string config_extern_from;
+    std::vector<std::string> namespaces;
+    if (options.count("namespace")) {
+      namespaces = options["namespace"].as<std::vector<std::string>>();
+      // cxxopts DROPS an empty argument before storing it, so `--namespace ""`
+      // arrived as no entry at all — and an empty list means "no filter": the
+      // caller asked for the file-level block only and silently got every
+      // block. Each dropped empty is recovered from the option count, and the
+      // global namespace may also be spelled the C++ way, `::`.
+      while (namespaces.size() < options.count("namespace"))
+        namespaces.push_back("");
+    }
+    for (auto& ns : namespaces)
+      if (ns == "::") ns.clear();
     if (options.count("config"))
       for (auto& conf : options["config"].as<std::vector<std::string>>())
         if (!load_config_file(conf, extra_cimports, typemap_substitutions,
-                              config_extern_from))
+                              config_extern_from, namespaces))
           return 1;
 
     std::string extern_from;
@@ -511,7 +528,7 @@ main(int argc, char* argv[]) try {
     autopxd = new AutoPxd(file->name(), output_dir, xml_dir,
                           extra_cimports, typemap_substitutions,
                           extern_from, options.count("no_nogil") == 0,
-                          options.count("except_plus") == 1);
+                          options.count("except_plus") == 1, namespaces);
 
     autopxd->autopxd_ast(*file);
 

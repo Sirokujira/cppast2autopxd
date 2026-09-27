@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#57 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#58 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -57,7 +57,13 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
   DECLARATOR, not a parameter list.
 - Option values are taken verbatim: `CXXOPTS_VECTOR_DELIMITER` is disabled
   in `main.cpp` because cxxopts otherwise splits a repeatable option's
-  value on commas, which silently broke `cimport A, B`.
+  value on commas, which silently broke `cimport A, B`. It also DROPS an
+  empty argument outright, so any option where "" is meaningful needs a
+  spelled form (`--namespace ::` for the global block) and the dropped
+  count recovered from `options.count()` (#58).
+- `--namespace` is an EXACT match on the block's full name, like the
+  Python filter: `pcl` does not cover `pcl::io`. It runs before import
+  hoisting so a dropped block takes its interleaved cimports with it.
 
 ## Name and spelling rules (#56)
 

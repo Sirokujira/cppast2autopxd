@@ -589,6 +589,52 @@ below: cross-header names (1b) and member function templates (1c).
     dropped, loudly or otherwise. `name_resolution.h` grew a case for each
     defect; every assertion was checked to fail without its fix.
 
+58. ~~batch `--config` mode was libclang-only, so a config-driven pipeline
+    (python-pcl_skbuild's `generate.py`) could not be pointed at this
+    tool at all — the last of the reasons listed under limitation 2b~~ →
+    `--namespace NS` (repeatable; also a repeatable `namespace = ` config
+    key) keeps only the `cdef extern from ... namespace "NS"` blocks named,
+    with the Python filter's EXACT-match semantics: `pcl` keeps `pcl` but
+    not `pcl::io` (that config writes `namespaces = ["pcl::io"]` for
+    pcd_io.h on purpose), and the file-level block is `::` — the C++
+    spelling of the global namespace — or an empty config value. It runs
+    before import hoisting, so the cimports interleaved with a dropped
+    block go with it. On the Python side `generate_pxd_cppast` gained
+    `namespaces`, `run_config` a `backend=` parameter that sends every job
+    through the delegation backend (a typemap entry's `cimport` becomes an
+    `--extra_cimport`; a job carrying `include`/`exclude`, `pyx_scaffold`,
+    C mode, `compile_db`, `extra_args` or `macros = false` is a
+    `ValueError` naming the job and the option, never a fall-back), and
+    the CLI's `--config` + `--backend cppast` refusal is gone.
+    One trap found on the way: cxxopts DROPS an empty argument before
+    storing it, so `--namespace ""` arrived as no entry at all, and an
+    empty list means "no filter" — the caller asked for the file-level
+    block only and silently got every block. Each dropped empty is now
+    recovered from the option count, and `::` is accepted so nothing has
+    to depend on an empty argument surviving a shell.
+    A second trap, caught by re-measuring python-pcl_skbuild's 68 headers
+    through the real `run_config` path rather than trusting the fixture:
+    the first cut dropped a block's interleaved cimports WITH the block,
+    on the theory that they belonged to it. They do not — the emitter
+    attaches `from libcpp.vector cimport vector` to whichever block is
+    open when the include or first reference is seen — so five compat
+    shims lost the `vector` / `string` / `shared_ptr` cimport their KEPT
+    block needed and stopped compiling (68/68 became 63/68). Import lines
+    are never filtered now; hoisting dedups and an unused cimport is
+    harmless. The fixture's `c` block is the only user of `std::vector`
+    for exactly this reason.
+    Gating: `tests/input_options/namespaces.h` (a file-level declaration,
+    `a`, nested `a::b`, `c`) generated four ways and checked by block
+    count and content; on the Python side a TWO-BACKEND PARITY GATE runs
+    the mini_pcl config through both backends and asserts every
+    declaration the libclang path emits comes out of the cppast path too
+    (the block-level vs per-function `nogil` spelling canonicalised).
+    Measured on the pipeline through `generate_job_cppast` itself — the
+    path a `--backend cppast` switch in its `generate.py` would take,
+    `namespaces` filter applied: **68/68 compile**, 57/68 line-for-line
+    in canonical form (4 exact, 53 modulo cimport order), 0 `# skipped:`.
+    Nothing on this tool's side keeps that pipeline on libclang any more.
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -638,15 +684,14 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    types are correct as of #57): `ctypedef void(*Fn)(shared_ptr[Widget],
    void*)` where the libclang emitter writes `(shared_ptr[Widget] w,
    void* user_data)`. Names in an extern declaration are documentation, so
-   this is cosmetic. Batch `--config` mode (2b) is what still keeps
-   python-pcl_skbuild's pipeline on the libclang backend.
-2b. **No name filtering.** `--include-name` / `--exclude-name` /
-   `--namespace` have no counterpart flags here, so the Python
-   `--backend cppast` path refuses them rather than degrading (as it does
-   for `--no-macros`, `--compile-db`, `--pyx-scaffold` and C mode).
-   python-pcl_skbuild's configs use none of them, so this is not what
-   keeps its pipeline on the libclang backend; what does is that batch
-   `--config` mode is libclang-only.
+   this is cosmetic.
+2b. **No NAME filtering.** `--include-name` / `--exclude-name` have no
+   counterpart flags here (namespace filtering does, since #58), so the
+   Python `--backend cppast` path refuses them rather than degrading (as
+   it does for `--no-macros`, `--compile-db`, `--pyx-scaffold` and C
+   mode). python-pcl_skbuild's configs use none of them, and batch
+   `--config` mode now drives this backend, so nothing on this list keeps
+   that pipeline on libclang any more — only the choice to stay there.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
    (they `#include` siblings); the committed `templates.h` / `vectord.h` /
    `statuslike.h` fixtures exercise the same constructs self-containedly.

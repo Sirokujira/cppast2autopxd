@@ -195,10 +195,12 @@ nothing is dropped silently at the boundary. The emitter-mode options both
 implementations share are `extern_from`, `nogil` and `except_plus`
 (`--extern_from` / `--no_nogil` / `--except_plus` on the binary), which is
 what lets the cppast path generate from a self-contained mirror header
-while declaring the real include path. Anything the binary has no flag for
-— name filtering, `--no-macros`, `--compile-db`, `--pyx-scaffold`, C mode,
-and `--config` batch mode — is a hard error naming the option, never a
-silent downgrade.
+while declaring the real include path, and `namespaces` maps onto its
+`--namespace` filter, so `--config` batch mode drives either backend
+(`cppast2autopxd --config pxdgen.toml --backend cppast`). Anything the
+binary has no flag for — `--include-name`/`--exclude-name`, `--no-macros`,
+`--compile-db`, `--pyx-scaffold`, C mode — is a hard error naming the
+option, never a silent downgrade.
 
 The IR layer stays backend-agnostic as the slot for a future parser-level
 backend (one that consumes an AST dump rather than a finished `.pxd`); the
