@@ -635,6 +635,37 @@ below: cross-header names (1b) and member function templates (1c).
     in canonical form (4 exact, 53 modulo cimport order), 0 `# skipped:`.
     Nothing on this tool's side keeps that pipeline on libclang any more.
 
+59. ~~#58 shipped with three defects~~ (pxd-reviewer):
+
+    * **a dropped block LEAKED through a multi-line import expansion.**
+      `#include <stdint.h>` becomes eight `from libc.stdint cimport ...`
+      lines that are ONE entity string; only its first line carries the
+      block indentation and the continuations sit at column 0. Inside a
+      dropped block those hit the "any other top-level line ends the
+      block" reset, `keep` came back on, and the rest of that block was
+      emitted with no header above it — `Possible inconsistent
+      indentation` from cython, exit 0 from the tool. A single-line
+      `<vector>` include is indented and never triggered it, which is
+      why the fixture passed; a mirror-header shape with `<stdint.h>`
+      plus a file-level typedef reproduced it at once, and so did
+      `--namespace zzz_nomatch` over the committed `c_api.h`. → import
+      lines are excluded from the reset. The fixture now carries exactly
+      that shape.
+    * **`namespace = ::` in a CONFIG FILE matched nothing**, silently:
+      the `::` → `""` normalisation ran before the config entries were
+      appended. → moved after them.
+    * **a `--namespace` that selects nothing was silent** on both
+      backends — an empty pxd but for the hoisted cimports, exit 0. →
+      the tool warns per unmatched name (`--namespace 'pcl' matched no
+      extern block`), and the delegation backend's stderr scrape
+      surfaces it in `GenerationResult.warnings`. (The Python filter
+      stays quiet; parity there is a follow-up.)
+
+    The two-backend parity gate also compared plain line SETS, which
+    cannot see a declaration emitted in the wrong block. It now keys
+    every line by its extern block. That is what makes limitation 2e
+    below visible.
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
@@ -685,6 +716,15 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    void*)` where the libclang emitter writes `(shared_ptr[Widget] w,
    void* user_data)`. Names in an extern declaration are documentation, so
    this is cosmetic.
+2e. **A file-level declaration AFTER a namespace block lands inside that
+   block.** `int before(); namespace a { ... } int after();` emits
+   `after()` under `cdef extern from "..." namespace "a":`, so Cython
+   would link it as `a::after` — and `--namespace ::` drops it while
+   `--namespace a` keeps it in the wrong place. Pre-existing (the
+   file-level header is emitted once, at file start, and never re-opened
+   after a namespace exit); the Python implementation places it
+   correctly. None of python-pcl_skbuild's 68 mirror headers has this
+   shape. Found by the reviewer probing #58.
 2b. **No NAME filtering.** `--include-name` / `--exclude-name` have no
    counterpart flags here (namespace filtering does, since #58), so the
    Python `--backend cppast` path refuses them rather than degrading (as

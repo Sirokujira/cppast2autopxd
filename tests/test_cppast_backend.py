@@ -400,6 +400,20 @@ def test_namespaces_filter_is_exact_match(tmp_path):
     assert 'namespace "a":' in only_a
     assert 'namespace "a::b"' not in only_a
     assert "global_count" not in only_a
+    # a dropped block must not leak through a multi-line import expansion:
+    # <stdint.h> is eight cimport lines with column-0 continuations, and
+    # the file-level typedef right after them once reappeared headerless
+    assert "ctypedef" not in only_a and "index_t" not in only_a
+    assert "from libc.stdint cimport uint32_t\n" in only_a
+
+    # a --namespace that selects nothing is never silent: the tool warns on
+    # stderr and the backend surfaces it
+    nothing = generate_pxd_cppast(
+        NAMESPACES_H, tool=_tool(), namespaces=["zzz"]
+    )
+    assert "cdef extern from" not in nothing.text
+    assert any("--namespace 'zzz' matched no extern block" in w
+               for w in nothing.warnings), nothing.warnings
 
     only_global = generate_pxd_cppast(
         NAMESPACES_H, tool=_tool(), namespaces=[""]
@@ -500,7 +514,12 @@ def test_both_backends_agree_on_the_mini_pcl_config(tmp_path):
         # drops `const` under `except +`; the cppast tool spells it per
         # function as `except + nogil const`. Both are valid Cython, so
         # `nogil` goes everywhere and a `const` after `except +` with it.
+        # Each line is keyed by the extern block it sits in, so a
+        # declaration the cppast path emits inside the WRONG block (a
+        # file-level function after a namespace block, say) is caught
+        # rather than hidden by plain set membership.
         lines = []
+        block = None
         for l in path.read_text().splitlines():
             t = l.rstrip()
             if not t or t.startswith("#") or t.lstrip().startswith(("from ", "cimport ")):
@@ -508,7 +527,9 @@ def test_both_backends_agree_on_the_mini_pcl_config(tmp_path):
             t = t.replace('" nogil:', '":').replace(" nogil", "")
             if t.endswith("except + const"):
                 t = t[: -len(" const")]
-            lines.append(t)
+            if t.startswith("cdef extern from"):
+                block = t
+            lines.append((block, t))
         return lines
 
     for name in ("point_types.pxd", "point_cloud.pxd"):

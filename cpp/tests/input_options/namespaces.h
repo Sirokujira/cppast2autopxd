@@ -7,9 +7,15 @@
 //   * no flag keeps everything, as before
 #pragma once
 
+#include <stdint.h>
 #include <vector>
 
-// file-level declaration: kept only when "" is among the namespaces
+// file-level declarations: kept only when "" is among the namespaces. The
+// typedef sits right after <stdint.h>, whose EIGHT-line cimport expansion is
+// one entity with continuation lines at column 0 -- the shape that once
+// re-enabled `keep` inside this dropped block and leaked the typedef,
+// headerless, into an `a`-only pxd.
+typedef uint32_t index_t;
 int global_count();
 
 namespace a {

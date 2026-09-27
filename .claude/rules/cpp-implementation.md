@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#58 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#59 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -63,7 +63,10 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
   count recovered from `options.count()` (#58).
 - `--namespace` is an EXACT match on the block's full name, like the
   Python filter: `pcl` does not cover `pcl::io`. It runs before import
-  hoisting so a dropped block takes its interleaved cimports with it.
+  hoisting; IMPORT LINES ARE NEVER DROPPED (the emitter attaches them to
+  whichever block is open, not the one that needs them) and never end a
+  block either (a multi-symbol include expansion has column-0
+  continuation lines). A name that matches nothing warns (#58, #59).
 
 ## Name and spelling rules (#56)
 

@@ -494,13 +494,15 @@ main(int argc, char* argv[]) try {
       while (namespaces.size() < options.count("namespace"))
         namespaces.push_back("");
     }
-    for (auto& ns : namespaces)
-      if (ns == "::") ns.clear();
     if (options.count("config"))
       for (auto& conf : options["config"].as<std::vector<std::string>>())
         if (!load_config_file(conf, extra_cimports, typemap_substitutions,
                               config_extern_from, namespaces))
           return 1;
+    // after the config entries are in, so `namespace = ::` in a file means
+    // the global block too (it used to match nothing, silently)
+    for (auto& ns : namespaces)
+      if (ns == "::") ns.clear();
 
     std::string extern_from;
     if (options.count("extern_from")) {

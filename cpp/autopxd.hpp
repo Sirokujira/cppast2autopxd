@@ -571,9 +571,15 @@ public:
                 return e == std::string::npos ? std::string() : hdr.substr(b, e - b);
             };
             bool keep = true;
+            std::vector<std::string> matched;
             std::string filtered;
             for(const auto& l : lines)
             {
+                std::string t = l;
+                t.erase(0, t.find_first_not_of(" \t"));
+                bool isImport = (t.rfind("from ", 0) == 0 &&
+                                 t.find(" cimport ") != std::string::npos)
+                                || t.rfind("cimport ", 0) == 0;
                 bool isHeader = l.rfind("cdef extern from", 0) == 0 &&
                                 !l.empty() && l.back() == ':';
                 if(isHeader)
@@ -581,20 +587,31 @@ public:
                     std::string ns = blockNamespace(l);
                     keep = std::find(allowedNamespaces.begin(), allowedNamespaces.end(), ns)
                            != allowedNamespaces.end();
+                    if(keep && std::find(matched.begin(), matched.end(), ns) == matched.end())
+                        matched.push_back(ns);
                 }
-                else if(!l.empty() && l[0] != ' ' && l[0] != '\t')
+                else if(!isImport && !l.empty() && l[0] != ' ' && l[0] != '\t')
                 {
-                    // any other top-level line ends the block it followed
+                    // Any other top-level line ends the block it followed.
+                    // Imports are excluded from this reset ON PURPOSE: a
+                    // multi-symbol include expansion (`<stdint.h>` -> eight
+                    // `from libc.stdint cimport ...` lines) is one entity
+                    // string whose continuation lines sit at column 0, and
+                    // treating them as "top-level" re-enabled `keep` inside a
+                    // DROPPED block, leaking the rest of that block with no
+                    // header above it -- an indentation error at exit 0.
                     keep = true;
                 }
-                std::string t = l;
-                t.erase(0, t.find_first_not_of(" \t"));
-                bool isImport = (t.rfind("from ", 0) == 0 &&
-                                 t.find(" cimport ") != std::string::npos)
-                                || t.rfind("cimport ", 0) == 0;
                 if(keep || isImport) { filtered += l; filtered += "\n"; }
             }
             body = filtered;
+            // never silent: a --namespace that selected nothing is almost
+            // certainly a typo (`pcl` for `pcl::io`), and the file would
+            // otherwise come out empty but for the hoisted cimports.
+            for(const auto& ns : allowedNamespaces)
+                if(std::find(matched.begin(), matched.end(), ns) == matched.end())
+                    std::cerr << "warning: --namespace '" << (ns.empty() ? "::" : ns)
+                              << "' matched no extern block in this header\n";
         }
 
         // Cython requires `from ... cimport ...` / `cimport ...` at module

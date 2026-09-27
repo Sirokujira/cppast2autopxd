@@ -298,8 +298,9 @@ fi
 # config-key route must agree with the flag.
 if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
   name="namespaces"
-  NS="$OUT/namespaces"; mkdir -p "$NS/a" "$NS/global" "$NS/conf" "$NS/c"
+  NS="$OUT/namespaces"; mkdir -p "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/nomatch" "$NS/confglobal"
   printf 'namespace = a\nnamespace = c\n' > "$NS/ac.conf"
+  printf 'namespace = ::\n' > "$NS/global.conf"
   if "$TOOL" --output_dir "$NS/a" --xml_dir "" --std "$STD" --namespace a \
         "$ROOT/tests/input_options/namespaces.h" >"$NS/a.log" 2>&1 \
      && "$TOOL" --output_dir "$NS/c" --xml_dir "" --std "$STD" --namespace c \
@@ -307,7 +308,11 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
      && "$TOOL" --output_dir "$NS/global" --xml_dir "" --std "$STD" --namespace :: \
         "$ROOT/tests/input_options/namespaces.h" >"$NS/global.log" 2>&1 \
      && "$TOOL" --output_dir "$NS/conf" --xml_dir "" --std "$STD" --config "$NS/ac.conf" \
-        "$ROOT/tests/input_options/namespaces.h" >"$NS/conf.log" 2>&1; then
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/conf.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/confglobal" --xml_dir "" --std "$STD" --config "$NS/global.conf" \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/confglobal.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/nomatch" --xml_dir "" --std "$STD" --namespace zzz \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/nomatch.log" 2>&1; then
     a="$NS/a/namespaces.pxd"; g="$NS/global/namespaces.pxd"; c="$NS/conf/namespaces.pxd"
     bad=""
     [[ "$(grep -c '^cdef extern from' "$a")" == 1 ]] || bad="$bad a-block-count"
@@ -326,11 +331,26 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
     grep -q '^from libcpp.vector cimport vector$' "$cc" || bad="$bad c-lost-cimport"
     grep -q 'vector\[int\] other_ids(const Other& o) nogil$' "$cc" || bad="$bad c-kept"
     [[ "$(grep -c '^cdef extern from' "$cc")" == 1 ]] || bad="$bad c-block-count"
+    # a dropped block must not LEAK through a multi-line import expansion:
+    # <stdint.h> expands to eight cimport lines whose continuations sit at
+    # column 0; the file-level typedef right after them must not reappear
+    # headerless in an `a`-only pxd
+    grep -q 'ctypedef' "$a" && bad="$bad a-dropped-block-leaked"
+    grep -q 'index_t' "$a" && bad="$bad a-dropped-typedef-leaked"
+    grep -q '^from libc.stdint cimport uint32_t$' "$a" || bad="$bad a-import-lost"
+    # `namespace = ::` in a CONFIG means the file-level block too
+    cg="$NS/confglobal/namespaces.pxd"
+    [[ "$(grep -c '^cdef extern from' "$cg")" == 1 ]] || bad="$bad confglobal-block-count"
+    grep -q 'ctypedef uint32_t index_t$' "$cg" || bad="$bad confglobal-kept"
+    # a --namespace that selects nothing is never silent
+    grep -q "warning: --namespace 'zzz' matched no extern block" "$NS/nomatch.log" \
+      || bad="$bad nomatch-silent"
+    grep -q '^cdef extern from' "$NS/nomatch/namespaces.pxd" && bad="$bad nomatch-emitted-block"
     if [[ -n "$bad" ]]; then
       printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
     elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
       ok=1
-      for d in "$NS/a" "$NS/global" "$NS/conf" "$NS/c"; do
+      for d in "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/confglobal"; do
         ( cd "$d" && "$CYTHON" --cplus namespaces.pxd ) >"$d/cython.log" 2>&1 || ok=0
       done
       if [[ $ok -eq 1 ]]; then
