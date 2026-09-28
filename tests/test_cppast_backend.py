@@ -499,6 +499,37 @@ def test_file_level_declaration_after_a_namespace_block():
     assert py.count("cdef extern from") == 6
 
 
+def test_namespace_matched_means_a_block_was_emitted():
+    """#61: a name that exists but exports nothing warns on both backends.
+    `namespaces_empty.h` has no file-level declaration (so `::` selects
+    nothing: the file-start header the C++ emitter always writes is
+    dropped as empty and must not count) and a using-only namespace."""
+    from cppast2autopxd import generate_pxd
+
+    empty_h = os.path.join(
+        REPO, "cpp", "tests", "input_options", "namespaces_empty.h"
+    )
+    for namespaces, expect_warning in (
+        ([""], "--namespace '::' matched no extern block"),
+        (["only_using"], "--namespace 'only_using' matched no extern block"),
+    ):
+        for result in (
+            generate_pxd_cppast(empty_h, tool=_tool(), namespaces=namespaces),
+            generate_pxd(empty_h, extern_from="namespaces_empty.h",
+                         namespaces=namespaces),
+        ):
+            assert "cdef extern from" not in result.text, result.text
+            assert any(expect_warning in w for w in result.warnings), (
+                namespaces, result.warnings)
+    for result in (
+        generate_pxd_cppast(empty_h, tool=_tool(), namespaces=["only"]),
+        generate_pxd(empty_h, extern_from="namespaces_empty.h",
+                     namespaces=["only"]),
+    ):
+        assert "int f()" in result.text
+        assert not [w for w in result.warnings if "matched no" in w]
+
+
 def test_run_config_through_cppast_backend(tmp_path):
     """Batch --config mode drives every job through the cppast backend and
     writes the same files the libclang path does — the last thing that

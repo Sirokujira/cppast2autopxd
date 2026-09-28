@@ -288,8 +288,11 @@ public:
                 // and Cython linked it as `a::after` (limitation 2e). The
                 // Python emitter re-opens the file-level block here; do the
                 // same. (At file start the block is already open, so nothing
-                // is emitted twice; an empty re-opened block cannot arise
-                // because this only runs right before an entity is written.)
+                // is emitted twice. An include/using/macro entity reaches
+                // this point too and writes nothing, so the re-opened block
+                // CAN come out empty; the drop-empty-blocks pass removes it,
+                // and #61 keeps such a header from counting as a
+                // --namespace match.)
                 refLines.push_back("\ncdef extern from \"" + header_name + "\":\n");
                 fileLevelBlockOpen = true;
                 container_start = false;
@@ -593,16 +596,21 @@ public:
                 size_t b = k + 12, e = hdr.find('"', b);
                 return e == std::string::npos ? std::string() : hdr.substr(b, e - b);
             };
+            auto isImportLine = [](const std::string& raw) {
+                std::string t = raw;
+                size_t k = t.find_first_not_of(" \t");
+                t.erase(0, k == std::string::npos ? t.size() : k);
+                return (t.rfind("from ", 0) == 0 &&
+                        t.find(" cimport ") != std::string::npos)
+                       || t.rfind("cimport ", 0) == 0;
+            };
             bool keep = true;
             std::vector<std::string> matched;
             std::string filtered;
-            for(const auto& l : lines)
+            for(size_t i = 0; i < lines.size(); ++i)
             {
-                std::string t = l;
-                t.erase(0, t.find_first_not_of(" \t"));
-                bool isImport = (t.rfind("from ", 0) == 0 &&
-                                 t.find(" cimport ") != std::string::npos)
-                                || t.rfind("cimport ", 0) == 0;
+                const std::string& l = lines[i];
+                bool isImport = isImportLine(l);
                 bool isHeader = l.rfind("cdef extern from", 0) == 0 &&
                                 !l.empty() && l.back() == ':';
                 if(isHeader)
@@ -610,7 +618,24 @@ public:
                     std::string ns = blockNamespace(l);
                     keep = std::find(allowedNamespaces.begin(), allowedNamespaces.end(), ns)
                            != allowedNamespaces.end();
-                    if(keep && std::find(matched.begin(), matched.end(), ns) == matched.end())
+                    // "matched" means a block with a BODY. The file-level
+                    // header is written unconditionally at file start, and a
+                    // namespace holding only a using-directive still gets
+                    // one; both are dropped as empty further down, so
+                    // counting them here made `--namespace ::` on a header
+                    // with no file-level declaration -- and `--namespace x`
+                    // on a re-export-only `x` -- silent (#61). Blank and
+                    // import lines are not a body; the next other line is.
+                    bool hasBody = false;
+                    for(size_t j = i + 1; j < lines.size(); ++j)
+                    {
+                        if(lines[j].find_first_not_of(" \t") == std::string::npos) continue;
+                        if(isImportLine(lines[j])) continue;
+                        hasBody = lines[j][0] == ' ' || lines[j][0] == '\t';
+                        break;
+                    }
+                    if(keep && hasBody &&
+                       std::find(matched.begin(), matched.end(), ns) == matched.end())
                         matched.push_back(ns);
                 }
                 else if(!isImport && !l.empty() && l[0] != ' ' && l[0] != '\t')

@@ -299,6 +299,7 @@ fi
 if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
   name="namespaces"
   NS="$OUT/namespaces"; mkdir -p "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/nomatch" "$NS/confglobal" "$NS/all"
+  NE="$ROOT/tests/input_options/namespaces_empty.h"; mkdir -p "$NS/e_global" "$NS/e_using" "$NS/e_only"
   printf 'namespace = a\nnamespace = c\n' > "$NS/ac.conf"
   printf 'namespace = ::\n' > "$NS/global.conf"
   if "$TOOL" --output_dir "$NS/a" --xml_dir "" --std "$STD" --namespace a \
@@ -314,7 +315,13 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
      && "$TOOL" --output_dir "$NS/nomatch" --xml_dir "" --std "$STD" --namespace zzz \
         "$ROOT/tests/input_options/namespaces.h" >"$NS/nomatch.log" 2>&1 \
      && "$TOOL" --output_dir "$NS/all" --xml_dir "" --std "$STD" \
-        "$ROOT/tests/input_options/namespaces.h" >"$NS/all.log" 2>&1; then
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/all.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/e_global" --xml_dir "" --std "$STD" --namespace :: \
+        "$NE" >"$NS/e_global.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/e_using" --xml_dir "" --std "$STD" --namespace only_using \
+        "$NE" >"$NS/e_using.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/e_only" --xml_dir "" --std "$STD" --namespace only \
+        "$NE" >"$NS/e_only.log" 2>&1; then
     a="$NS/a/namespaces.pxd"; g="$NS/global/namespaces.pxd"; c="$NS/conf/namespaces.pxd"
     bad=""
     # `a` is opened twice (once more after the trailing file-level block)
@@ -370,6 +377,15 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
     grep -q "warning: --namespace 'zzz' matched no extern block" "$NS/nomatch.log" \
       || bad="$bad nomatch-silent"
     grep -q '^cdef extern from' "$NS/nomatch/namespaces.pxd" && bad="$bad nomatch-emitted-block"
+    # #61: "matched" means a block with a body came out. The file-start
+    # header is always written and a using-only namespace gets one too;
+    # both are dropped as empty, so neither may count as a match
+    grep -q "warning: --namespace '::' matched no extern block" "$NS/e_global.log" || bad="$bad e-global-silent"
+    grep -q '^cdef extern from' "$NS/e_global/namespaces_empty.pxd" && bad="$bad e-global-emitted-block"
+    grep -q "warning: --namespace 'only_using' matched no extern block" "$NS/e_using.log" || bad="$bad e-using-silent"
+    grep -q '^cdef extern from' "$NS/e_using/namespaces_empty.pxd" && bad="$bad e-using-emitted-block"
+    grep -q "matched no extern block" "$NS/e_only.log" && bad="$bad e-only-false-warning"
+    grep -q 'int f() nogil$' "$NS/e_only/namespaces_empty.pxd" || bad="$bad e-only-kept"
     if [[ -n "$bad" ]]; then
       printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
     elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
@@ -377,6 +393,7 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
       for d in "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/confglobal" "$NS/all"; do
         ( cd "$d" && "$CYTHON" --cplus namespaces.pxd ) >"$d/cython.log" 2>&1 || ok=0
       done
+      ( cd "$NS/e_only" && "$CYTHON" --cplus namespaces_empty.pxd ) >"$NS/e_only/cython.log" 2>&1 || ok=0
       if [[ $ok -eq 1 ]]; then
         printf 'OK    %-24s a / c / global / a+c via config / unfiltered  [cython OK]\n' "$name"
       else

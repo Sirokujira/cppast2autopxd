@@ -687,6 +687,29 @@ below: cross-header names (1b) and member function templates (1c).
     records every namespace that reached the filter and warns, in the
     C++ tool's exact wording, for each configured name it never saw.
 
+61. ~~#60's Python warning shipped with two defects, and the C++ tool's
+    notion of "matched" had a hole of its own~~ (pxd-reviewer probing
+    #60):
+
+    * the Python check keyed on namespaces that REACHED the filter, so a
+      namespace holding only a `using namespace` directive or an alias
+      counted as matched and the pxd came out empty, silently;
+    * it ran BEFORE the macro pass, which can supply the file-level block
+      by itself, so `--namespace ::` on `#define LIMIT 42` plus a
+      namespace warned falsely while emitting that very block;
+    * the C++ pass counted a header as matched when it was KEPT — but the
+      file-start header is written unconditionally and a using-only
+      namespace gets one too, both dropped as empty further down — so
+      `--namespace ::` on a header with no file-level declaration was
+      silent (pre-existing since #58).
+
+    → "matched" now means a block with a body came out, on both sides:
+    the Python check runs after the macro pass and keys on the blocks
+    that hold entities; the C++ pass looks past blank and import lines
+    for an indented body before counting a header. `namespaces_empty.h`
+    (no file-level declaration, a using-only namespace) gates both, and
+    the backend test runs it through both backends.
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 

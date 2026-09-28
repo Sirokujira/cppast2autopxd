@@ -55,8 +55,11 @@ pyx_scaffold.py (IR -> starting-point .pyx; never overwrites, always
 - `--namespace` is an EXACT match (`pcl` does not cover `pcl::io`), and a
   value that selects nothing WARNS (`--namespace 'x' matched no extern
   block in this header`, the C++ tool's wording) instead of yielding an
-  empty pxd silently. The global namespace is spelled `""` in the API and
-  reported as `'::'`.
+  empty pxd silently. "Matched" means a block with declarations came
+  out — a namespace holding only a using-directive or an alias warns
+  too — and the check runs AFTER the macro pass, which can supply the
+  file-level block by itself. The global namespace is spelled `""` in
+  the API and reported as `'::'`.
 
 ## Environment
 

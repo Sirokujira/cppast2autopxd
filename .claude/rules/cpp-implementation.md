@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#60 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#61 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -66,7 +66,10 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
   hoisting; IMPORT LINES ARE NEVER DROPPED (the emitter attaches them to
   whichever block is open, not the one that needs them) and never end a
   block either (a multi-symbol include expansion has column-0
-  continuation lines). A name that matches nothing warns (#58, #59).
+  continuation lines). A name that matches nothing warns (#58, #59), and
+  "matched" means a block with a BODY came out (#61): the file-start
+  header is written unconditionally and a using-only namespace gets one
+  too, both dropped later as empty, so a kept header alone is no match.
 - The file-level extern block is written once at file start and RE-OPENED
   before the first file-level entity that follows a namespace block (#60);
   a namespace re-opened after that gets its header again. Consecutive
