@@ -530,6 +530,44 @@ def test_namespace_matched_means_a_block_was_emitted():
         assert not [w for w in result.warnings if "matched no" in w]
 
 
+def test_nested_types_inside_a_class(tmp_path):
+    """#62: both backends emit a class's nested struct / enum / enum class
+    / cppclass without `cdef`, promote a struct that holds a nested type,
+    keep a scoped enum's `class`, and keep the ENCLOSING class's access
+    tracking intact across a nested type (K's private members leaked
+    after `struct In` on the C++ backend)."""
+    from cppast2autopxd import generate_pxd
+
+    nested_h = os.path.join(
+        REPO, "cpp", "tests", "input_options", "nested_types.h"
+    )
+    cpp = generate_pxd_cppast(nested_h, tool=_tool(), namespaces=["demo"])
+    py = generate_pxd(nested_h, extern_from="nested_types.h",
+                      namespaces=["demo"])
+    assert not [w for w in cpp.warnings if "skipped" in w], cpp.warnings
+    for text in (cpp.text, py.text):
+        for line in (
+            "        struct In:", "        enum Mode:",
+            "        enum class Kind:", "        cppclass Inner:",
+            "    cdef enum class Top:", "    cdef cppclass S:",
+            "    cdef cppclass Box[T]:", "        struct Item:",
+        ):
+            assert line + "\n" in text, (line, text)
+        assert "        cdef " not in text, text
+        for name in ("hidden", "secret"):
+            assert name not in text, (name, text)
+        for name in ("after_struct(", "after_inner(", "shown(", "get(",
+                     "first("):
+            assert name in text, (name, text)
+    _cython_ok(
+        tmp_path, "nested_types", cpp.text,
+        "from nested_types cimport K, S, Box\n"
+        "def f():\n    cdef K k\n    cdef K.In i = k.get()\n    cdef S s\n"
+        "    cdef Box[int] b\n    cdef Box[int].Item it = b.first()\n"
+        "    return i.q + s.nested.n + it.value\n",
+    )
+
+
 def test_run_config_through_cppast_backend(tmp_path):
     """Batch --config mode drives every job through the cppast backend and
     writes the same files the libclang path does — the last thing that

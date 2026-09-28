@@ -409,6 +409,53 @@ else
   printf 'NG    %-24s tests/input_options/namespaces.h missing\n' "namespaces"; status=1
 fi
 
+# ---- nested types inside a class (#62): headers below the extern-block
+# level drop `cdef`, a struct holding a nested type promotes, a scoped enum
+# keeps `class`, and a nested type leaves the ENCLOSING class's access
+# tracking alone
+if [[ -f "$ROOT/tests/input_options/nested_types.h" ]]; then
+  name="nested_types"
+  NT="$OUT/nested_types"; mkdir -p "$NT"
+  if "$TOOL" --output_dir "$NT" --xml_dir "" --std "$STD" \
+        "$ROOT/tests/input_options/nested_types.h" >"$NT/gen.log" 2>&1; then
+    nt="$NT/nested_types.pxd"
+    bad=""
+    grep -q '^        cdef ' "$nt" && bad="$bad nested-cdef"
+    grep -q '^        struct In:$' "$nt" || bad="$bad nested-struct"
+    grep -q '^        enum Mode:$' "$nt" || bad="$bad nested-enum"
+    grep -q '^        enum class Kind:$' "$nt" || bad="$bad nested-enum-class"
+    grep -q '^        cppclass Inner:$' "$nt" || bad="$bad nested-cppclass"
+    grep -q '^    cdef enum class Top:$' "$nt" || bad="$bad scoped-enum"
+    grep -q '^    cdef cppclass S:$' "$nt" || bad="$bad struct-not-promoted"
+    grep -q '^    cdef cppclass Box\[T\]:$' "$nt" || bad="$bad template-class"
+    grep -q '^        struct Item:$' "$nt" || bad="$bad template-nested-struct"
+    # access state: private members after a nested struct used to leak, and
+    # public ones after a nested class (with its own `public:`) must survive
+    grep -q 'hidden' "$nt" && bad="$bad private-leaked"
+    grep -q 'secret' "$nt" && bad="$bad inner-private-leaked"
+    grep -q 'int after_struct() nogil const$' "$nt" || bad="$bad public-after-struct-lost"
+    grep -q 'int after_inner() nogil$' "$nt" || bad="$bad public-after-inner-lost"
+    grep -q 'int shown() nogil const$' "$nt" || bad="$bad inner-public-lost"
+    grep -q '# skipped' "$nt" && bad="$bad skipped"
+    if [[ -n "$bad" ]]; then
+      printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
+    elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
+      printf '# distutils: language = c++\nfrom nested_types cimport K, S, Top, Box\ndef f():\n    cdef K k\n    cdef K.In i = k.get()\n    cdef S s\n    cdef Box[int] b\n    cdef Box[int].Item it = b.first()\n    return i.q + s.nested.n + it.value\n' > "$NT/use_nested.pyx"
+      if ( cd "$NT" && "$CYTHON" --cplus nested_types.pxd && "$CYTHON" --cplus use_nested.pyx ) >"$NT/cython.log" 2>&1; then
+        printf 'OK    %-24s nested struct/enum/class, promotion, access  [cython OK]\n' "$name"
+      else
+        printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$NT"; status=1
+      fi
+    else
+      printf 'OK    %-24s nested struct/enum/class, promotion, access  [cython skipped]\n' "$name"
+    fi
+  else
+    printf 'NG    %-24s generation failed\n' "$name"; status=1
+  fi
+else
+  printf 'NG    %-24s tests/input_options/nested_types.h missing\n' "nested_types"; status=1
+fi
+
 # --- real-PCL sweep (auto-skips without a PCL install; gates with one) -----
 # -f, not -x: the script is invoked through `bash`, so a checkout that drops
 # the exec bit (Windows, zip export, core.fileMode=false) must not silently

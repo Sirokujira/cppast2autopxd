@@ -16,7 +16,7 @@ paths: "cpp/**"
 
 ## The ledger
 
-- `FEASIBILITY.md` numbers every emission fix (#1..#61 so far). When you
+- `FEASIBILITY.md` numbers every emission fix (#1..#62 so far). When you
   fix or add a behavior, append a numbered entry with the before/after.
 
 ## Build & test
@@ -76,6 +76,20 @@ pip install ./cpp             # scikit-build + CMake packaging: builds the
   same-name blocks are never merged (neither backend does), and a
   re-opened file-level header has an empty block namespace like the
   first, so `--namespace ::` keeps both.
+
+## Nested types and class state (#62)
+
+- Every block header BELOW the extern-block level drops `cdef` (`struct
+  In:`, `enum class Kind:`, `cppclass Inner:`), in one late pass — never
+  rely on an individual emitter to know it is nested.
+- A struct promotes to `cdef cppclass` when it holds a method, a member
+  typedef, template parameters, OR a nested type: a `cdef struct` body
+  admits fields only.
+- A scoped enum keeps its `class`; as a plain `enum` the enumerators
+  would be referenced unscoped and fail at C++ compile time, silently.
+- `isClass` / `isClassAccessPublic` describe the class being emitted; a
+  nested class/struct saves the enclosing pair on entry and restores it
+  on exit (`classCtxStack`). A single flag here leaked private members.
 
 ## Name and spelling rules (#56)
 

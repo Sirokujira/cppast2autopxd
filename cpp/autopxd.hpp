@@ -21,6 +21,7 @@
 #include <cppast/cpp_entity_kind.hpp>        // for the cpp_entity_kind definition
 #include <cppast/cpp_forward_declarable.hpp> // for is_definition()
 #include <cppast/cpp_namespace.hpp>          // for cpp_namespace
+#include <cppast/cpp_enum.hpp>              // for cpp_enum::is_scoped() (#62)
 #include <cppast/cpp_function_template.hpp>  // for cpp_function_template (free fn templates)
 #include <cppast/cpp_template_parameter.hpp> // for template parameter names
 
@@ -142,6 +143,12 @@ private:
     std::string const_str;
     bool isClass;
     bool isClassAccessPublic;
+    // #62: (isClass, isClassAccessPublic) of the ENCLOSING class, saved when
+    // a nested class/struct is entered and restored on its exit. Both were
+    // single flags before, so `struct In {...};` inside `class K` turned K
+    // into "a struct" for the rest of its body and its private members
+    // leaked into the pxd.
+    std::vector<std::pair<bool, bool>> classCtxStack;
     bool isEnumClassInFlag;
     bool isAnonymous;
     int indentCount;
@@ -442,6 +449,14 @@ public:
                     // namespace exits re-entered the namespace_t branch and
                     // never reached this decrement — keep that behavior.
                     indentCount--;
+                    if((e.kind() == cppast::cpp_entity_kind::class_t ||
+                        e.kind() == cppast::cpp_entity_kind::class_template_t) &&
+                       !classCtxStack.empty())
+                    {
+                        isClass = classCtxStack.back().first;
+                        isClassAccessPublic = classCtxStack.back().second;
+                        classCtxStack.pop_back();
+                    }
                 }
                 std::cout << "indentCount: ";
                 std::cout << indentCount;
@@ -526,6 +541,15 @@ public:
                 // free function would place that function in the file-level
                 // (non-namespaced) extern block and link against ::fn.
                 emitNamespaceHeader();
+
+                // #62: save the enclosing class's kind/access state before a
+                // nested class/struct overwrites it; the matching exit above
+                // restores it. The templated inner class_t never gets here
+                // (skipped with both events), so pushes and pops pair up.
+                if(info.event == cppast::visitor_info::container_entity_enter &&
+                   (e.kind() == cppast::cpp_entity_kind::class_t ||
+                    e.kind() == cppast::cpp_entity_kind::class_template_t))
+                    classCtxStack.push_back({isClass, isClassAccessPublic});
 
                 // print_entity(out, e);
                 // autopxd_entity(out, e);
@@ -1432,6 +1456,7 @@ public:
 
                 bool hasMemberTypedef = false;
                 bool hasMethod = false;
+                bool hasNestedType = false;
                 for(size_t j = i + 1; j < lines.size(); ++j)
                 {
                     if(lines[j].find_first_not_of(" \t") == std::string::npos)
@@ -1440,6 +1465,21 @@ public:
                         break;                          // dedent: body ended
                     std::string t = lines[j].substr(indentOf(lines[j]));
                     if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
+                    // #62: a NESTED TYPE makes the struct C++-only as well — a
+                    // `cdef struct` body admits fields only, cython rejects a
+                    // `struct Nested:` inside it. Either spelling of the
+                    // nested header counts (the `cdef` is stripped below).
+                    {
+                        std::string nt = t;
+                        while(!nt.empty() && (nt.back() == ' ' || nt.back() == '\t'))
+                            nt.pop_back();
+                        static const char* nestedHeads[] = {
+                            "cdef struct ", "cdef enum ", "cdef enum:", "cdef cppclass ",
+                            "cdef union ", "struct ", "enum ", "enum:", "cppclass ", "union " };
+                        if(!nt.empty() && nt.back() == ':')
+                            for(const char* h : nestedHeads)
+                                if(nt.rfind(h, 0) == 0) { hasNestedType = true; break; }
+                    }
                     // A METHOD makes the struct C++-only too, and Cython
                     // rejects a `const`-qualified method inside `cdef struct`
                     // (`Ops operator+(...) nogil const`, silently broken
@@ -1457,7 +1497,7 @@ public:
                             hasMethod = true;
                     }
                 }
-                if(hasMemberTypedef || isTemplateHeader || hasMethod)
+                if(hasMemberTypedef || isTemplateHeader || hasMethod || hasNestedType)
                 {
                     lines[i] = std::string(p, ' ') + "cdef cppclass " +
                                body_t.substr(structKw.size());
@@ -1481,6 +1521,23 @@ public:
                             lines[j] = std::string(ind, ' ') + bt.substr(5);
                     }
                 }
+            }
+
+            // #62: every block header BELOW the extern-block level drops
+            // `cdef`, not only those inside a promoted struct: `cdef struct
+            // In:` under a `cdef cppclass K:` is a cython syntax error
+            // (`Expected an identifier, found 'cdef'`). The enum emitter
+            // already omitted it inside a class, but the record emitters
+            // never did. Block bodies sit at four spaces; anything deeper
+            // is nested.
+            for(size_t i = 0; i < lines.size(); ++i)
+            {
+                int p = indentOf(lines[i]);
+                if(p <= 4) continue;
+                std::string t = lines[i].substr(p);
+                while(!t.empty() && (t.back() == ' ' || t.back() == '\t')) t.pop_back();
+                if(t.empty() || t.back() != ':' || t.rfind("cdef ", 0) != 0) continue;
+                lines[i] = std::string(p, ' ') + t.substr(5);
             }
 
             rest.clear();
@@ -3574,6 +3631,11 @@ private:
             std::string enumTemplateDef = "";
             std::string generatorParam = "";
             std::string enumTypeName = "";
+            // #62: a scoped enum keeps its `class` — Cython 3 spells it
+            // `enum class Kind:` and references the enumerators as
+            // `Kind::X`; as a plain `enum` they would be emitted unscoped and
+            // fail at C++ compile time.
+            const bool scopedEnum = static_cast<const cppast::cpp_enum&>(e).is_scoped();
 
             enumTemplateDef += indentSpace;
 
@@ -3610,7 +3672,7 @@ private:
                 // class 内 enum 定義。Cython では cppclass 内のネスト enum は
                 // `enum Name:` と書く(`cdef` は付けない — 付けると構文エラー)。
                 // メンバは素の名前で列挙する。
-                enumTemplateDef += "enum";
+                enumTemplateDef += scopedEnum ? "enum class" : "enum";
                 if(!enumTypeName.empty())
                 {
                     enumTemplateDef += " ";
@@ -3623,7 +3685,7 @@ private:
             else
             {
                 // class 外定義
-                enumTemplateDef += "cdef enum";
+                enumTemplateDef += scopedEnum ? "cdef enum class" : "cdef enum";
                 if(enumTypeName.empty())
                 {
                     // None

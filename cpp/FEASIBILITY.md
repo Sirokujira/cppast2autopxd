@@ -710,6 +710,40 @@ below: cross-header names (1b) and member function templates (1c).
     (no file-level declaration, a using-only namespace) gates both, and
     the backend test runs it through both backends.
 
+62. ~~Nested types inside a class came out wrong four ways~~ (pxd-reviewer
+    probing #60, then widened by probing the shape):
+
+    * `cdef struct In:` / `cdef cppclass Inner:` under a `cdef cppclass
+      K:` — cython: `Expected an identifier, found 'cdef'`. The enum
+      emitter knew to omit `cdef` inside a class; the record emitters
+      never did, and the promotion pass (#49) stripped it only inside a
+      struct it had just promoted. → every block header below the
+      extern-block level drops `cdef`, in one pass.
+    * a struct holding a nested type stayed `cdef struct`, whose body
+      admits fields only. → it promotes to `cdef cppclass` like a struct
+      with methods or member typedefs does.
+    * `enum class Kind` was emitted as a plain `enum`, so its enumerators
+      would be referenced unscoped and fail at C++ compile time — a
+      silent one. → `cpp_enum::is_scoped()` keeps the `class`
+      (`cdef enum class Top:` at block level, `enum class Kind:` nested;
+      both accepted by cython 3.3, and the libclang emitter's spelling).
+    * the ENCLOSING class's private members leaked after a nested struct:
+      kind and access were two single flags, so `struct In {...};`
+      inside `class K` turned K into "a struct" (public by default) for
+      the rest of its body — `int hidden();` after it came out. A nested
+      *class* did not leak but left its own last access state behind.
+      → the pair is saved when a class/struct is entered and restored on
+      its exit (the templated inner `class_t` is skipped with both
+      events, so pushes and pops pair up).
+
+    `nested_types.h` carries all four shapes plus a nested struct in a
+    class template (`Box.Item first()` inside `cdef cppclass Box[T]`,
+    `Box[int].Item` at a use site — both accepted), gated by content and
+    by cython on the pxd AND a use-site pyx; the backend test asserts the
+    same lines out of both backends. python-pcl_skbuild's 68 mirror
+    headers have no nested type in a class (its RangeImage mirror hoists
+    `CoordinateFrame` out), so the committed pxd are unchanged.
+
 
 ### Compilation-database mode (real PCL, verified on Linux)
 
