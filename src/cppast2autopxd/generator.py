@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import __version__
 from .config import GeneratorConfig, HeaderJob
@@ -171,11 +171,25 @@ def scaffold_collides(pyx_path: str, pxd_path: str) -> bool:
     return a == b
 
 
-def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
-    """Run every header job in a config. Returns all warnings."""
+def run_config(
+    cfg: GeneratorConfig, verbose: bool = True, backend: str = "libclang"
+) -> List[str]:
+    """Run every header job in a config. Returns all warnings.
+
+    ``backend`` selects the parser for every job: ``"libclang"`` (this
+    package) or ``"cppast"`` (delegation to the ``cppast_autopxd``
+    binary, see :mod:`cppast2autopxd.cppast_backend`).  A job carrying an
+    option the cppast backend has no flag for is a ``ValueError`` naming
+    the job and the option — never a silent fall-back to libclang.
+    """
+    if backend not in ("libclang", "cppast"):
+        raise ValueError(f"unknown backend {backend!r}")
     all_warnings: List[str] = []
     for job in cfg.headers:
-        result = generate_job(cfg, job)
+        if backend == "cppast":
+            result = generate_job_cppast(cfg, job)
+        else:
+            result = generate_job(cfg, job)
         os.makedirs(os.path.dirname(job.output) or ".", exist_ok=True)
         with open(job.output, "w", encoding="utf-8") as fh:
             fh.write(result.text)
@@ -187,6 +201,11 @@ def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
         all_warnings.extend(result.warnings)
 
         if job.pyx_scaffold:
+            if result.module is None:
+                raise ValueError(
+                    f"{os.path.relpath(job.path, cfg.base_dir)}: pyx_scaffold "
+                    "needs the libclang backend (the cppast backend yields no IR)"
+                )
             if scaffold_collides(job.pyx_scaffold, job.output):
                 raise ValueError(
                     f"pyx_scaffold {job.pyx_scaffold!r} and output "
@@ -219,6 +238,58 @@ def run_config(cfg: GeneratorConfig, verbose: bool = True) -> List[str]:
                         + os.path.relpath(job.pyx_scaffold, cfg.base_dir)
                     )
     return all_warnings
+
+
+def generate_job_cppast(cfg: GeneratorConfig, job: HeaderJob) -> GenerationResult:
+    """One config job through the cppast delegation backend.
+
+    Maps the config's option surface onto ``generate_pxd_cppast``.  A
+    typemap substitution becomes ``FROM=TO`` and, when it names a cimport,
+    that cimport joins the job's ``extra_cimports`` (the tool dedups by
+    symbol).  Anything with no counterpart is refused by name.
+    """
+    from .cppast_backend import generate_pxd_cppast
+
+    language = job.language or cfg.language
+    unsupported = [
+        name for name, val in (
+            ("include", job.include_names),
+            ("exclude", job.exclude_names),
+            ("pyx_scaffold", job.pyx_scaffold),
+            ("language = \"c\"", language == "c"),
+            ("compile_db", cfg.compile_db),
+            ("extra_args", cfg.extra_args),
+            ("macros = false", not cfg.macros),
+        ) if val
+    ]
+    if unsupported:
+        raise ValueError(
+            f"{os.path.relpath(job.path, cfg.base_dir)}: the cppast backend "
+            "cannot honor " + ", ".join(unsupported)
+            + " (keep the libclang backend for this config)"
+        )
+
+    substitutions: Dict[str, str] = {}
+    extra_cimports = list(job.extra_cimports)
+    for cpp_name, sub in cfg.substitutions.items():
+        substitutions[cpp_name] = sub.cython
+        if sub.cimport and sub.cimport not in extra_cimports:
+            extra_cimports.append(sub.cimport)
+
+    return generate_pxd_cppast(
+        job.path,
+        include_dirs=cfg.include_dirs,
+        defines=cfg.defines,
+        std=cfg.std,
+        substitutions=substitutions,
+        extra_cimports=extra_cimports,
+        extern_from=job.extern_from,
+        nogil=cfg.nogil,
+        # None means "the C++ default" here exactly as in generate_pxd:
+        # except+ on for C++ (C mode was refused above).
+        except_plus=True if cfg.except_plus is None else cfg.except_plus,
+        namespaces=job.namespaces,
+    )
 
 
 def generate_job(cfg: GeneratorConfig, job: HeaderJob) -> GenerationResult:

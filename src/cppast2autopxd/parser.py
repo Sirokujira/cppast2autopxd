@@ -243,6 +243,18 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
     lowering.visit_children(tu.cursor, namespace="")
     if options.macros:
         _collect_macro_constants(tu, module, main_abs)
+    # A --namespace that selects nothing used to yield an empty pxd with
+    # exit 0.  "Matched" means a block with declarations came out for it,
+    # not that the namespace exists: one holding only a using-directive or
+    # an alias exports nothing either, and the macro pass above can supply
+    # the file-level block by itself.  Same wording as the C++ tool so a
+    # consumer greps one string.
+    emitted = {b.namespace for b in module.blocks if b.entities}
+    for ns in options.namespaces:
+        if ns not in emitted:
+            module.warnings.append(
+                f"--namespace '{ns or '::'}' matched no extern block in this header"
+            )
     return module
 
 

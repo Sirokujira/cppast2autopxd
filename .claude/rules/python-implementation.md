@@ -22,8 +22,16 @@ pyx_scaffold.py (IR -> starting-point .pyx; never overwrites, always
 
 ## Cython grammar facts (proven by probes — do not re-litigate)
 
-1. `const` method qualifier and `except +` cannot be combined; `except +`
-   wins (`emitter._one_signature`).
+1. `const` and `except +` are separable ONLY by a per-function `nogil`.
+   Measured against cython 3.2.9: `f() except + nogil const` and
+   `f() nogil const` are accepted; `f() const except +`,
+   `f() except + const` and `f() const nogil` are all syntax errors, and
+   `f() nogil except +` compiles with a deprecation warning. This
+   emitter puts `nogil` on the extern BLOCK, so it has no separator to
+   use and `except +` wins, dropping the const (`emitter._one_signature`).
+   The C++ implementation emits `nogil` per function and therefore keeps
+   the const (`except + nogil const`, cpp/FEASIBILITY #54) — a fidelity
+   difference, not a disagreement about the grammar.
 2. `=*` is ONLY for template parameter defaults; C++ default arguments
    expand into overloads (`emitter._signatures`).
 3. Methods returning non-const `T&` never get `except +` — the try/catch
@@ -44,6 +52,14 @@ pyx_scaffold.py (IR -> starting-point .pyx; never overwrites, always
   means. Unknown tails still raise.
 - The parser retries with the canonical spelling before giving up
   (`uindex_t` -> `unsigned int`).
+- `--namespace` is an EXACT match (`pcl` does not cover `pcl::io`), and a
+  value that selects nothing WARNS (`--namespace 'x' matched no extern
+  block in this header`, the C++ tool's wording) instead of yielding an
+  empty pxd silently. "Matched" means a block with declarations came
+  out — a namespace holding only a using-directive or an alias warns
+  too — and the check runs AFTER the macro pass, which can supply the
+  file-level block by itself. The global namespace is spelled `""` in
+  the API and reported as `'::'`.
 
 ## Environment
 

@@ -54,6 +54,12 @@ OK    vectord                         821 bytes  (23 AST visits)  [cython OK]
 (`tests/input/draco/status.h`, a fetched/gitignored real header, is generated
 and checked too but is informational — see limitations below.)
 
+Two further gating blocks run after the fixture list: `options`, which
+composes `--extra_cimport` / `--typemap` / `--config` across a
+cross-cimporting pair (#51, #52), and `emit_modes`, which generates one
+fixture twice to cover `--extern_from` / `--except_plus` / `--no_nogil`
+(#54). Both end in the same `[cython OK]` gate.
+
 ### C++ — `tests/input/simple.h` → `tests/output/simple.pxd`
 
 Actual output (abridged):
@@ -390,6 +396,355 @@ below: cross-header names (1b) and member function templates (1c).
     include-root spelling `PCL_ROOT=/usr/include/pcl-1.12` — and a
     mismatch exits 1).
 
+53. the Python package gained a `cppast` BACKEND (`generate_pxd_cppast`,
+    `--backend cppast`): one header delegated to this binary, with options
+    mapped onto its flags and both diagnostic streams — stderr `warning:`
+    lines and every `# skipped:` comment — surfaced as
+    `GenerationResult.warnings`, so the never-silent contract crosses the
+    delegation boundary. Deliberately a delegation, not the IR-level
+    AST-dump parser the docs once imagined: this tool's emission is a
+    token pipeline with no externalizable IR.
+54. ~~that backend could not serve the downstream pipeline it was built
+    for: python-pcl_skbuild parses SELF-CONTAINED MIRROR headers but the
+    generated pxd must name the REAL PCL include path, and this tool
+    always wrote the parsed file's basename — so every pxd it produced
+    declared `cdef extern from "voxel_grid.h"` and the C++ compiler could
+    never find it. `nogil` was likewise hard-coded on and `except +` had
+    no spelling at all, so a C++ exception crossing the boundary
+    terminated the process~~ → `--extern_from PATH` (also accepted as an
+    `extern_from = ` config key, single-valued, a second one is a located
+    error), `--except_plus` and `--no_nogil`, the counterparts of the
+    Python emitter's `extern_from` / `except_plus` / `nogil`. The `except
+    +` placement follows two rules, both established by running the real
+    cython compiler rather than from memory:
+
+    | spelling | cython |
+    |---|---|
+    | `f() except + nogil const` | **OK** |
+    | `f() nogil const` | **OK** |
+    | `f() except +` | **OK** |
+    | `f() const except +` | error |
+    | `f() except + const` | error |
+    | `f() const nogil` | error |
+    | `f() nogil except +` | OK, but deprecated ("nogil should appear at the end") |
+
+    So `const` is legal only AFTER `nogil`, and `except +` only before it:
+    `except + nogil const` is the one accepted spelling of a const method,
+    and under `--no_nogil` there is no separator, so exception propagation
+    wins and the `const` is dropped (the same trade-off the Python emitter
+    makes). Independently, a MUTABLE-REFERENCE return (`T&`, including
+    `operator[]`, `at`, `front` and member function templates) is exempt:
+    cython's try/catch wrapping stores the result in a by-value temporary,
+    so `except +` there would silently hand out a reference to a copy —
+    which is why cython's own `libcpp` declarations omit it too. A
+    `const T&` return is by-value safe and does take it.
+    Verified against the pipeline: `pcl_point_cloud.h` generated with
+    `--extern_from pcl/point_cloud.h --except_plus --no_nogil` is
+    line-for-line the committed `src/pcl/pxd/point_cloud.pxd` of
+    python-pcl_skbuild apart from the order of two cimport lines.
+    Gating fixture `tests/input_options/emit_modes.h`, generated in both
+    modes and checked by CONTENT (a silently missing `except +` would
+    still cython-compile) as well as by the cython gate.
+
+55. ~~#54 shipped with five silent misfires, four of them found by the
+    pxd-reviewer probing it and one by generating all 68 of
+    python-pcl_skbuild's mirror headers through the tool~~:
+
+    * **`<` in an operator NAME read as an open angle bracket.** By the
+      time the `except +` pass runs, #33 has rewritten every template
+      `<...>` to `[...]`, so the only `<` left in a declaration IS an
+      operator — and counting it made `operator<` / `operator<=` look
+      like they had no parameter list at all. They were skipped in
+      silence while `operator>=` one line below got its `except +`: one
+      comparison operator would `std::terminate` on a C++ exception and
+      its neighbour would propagate it. Visible on the already-committed
+      `smart_returns.h`, and invisible to both gates because the output
+      still compiles. → the angle counter is gone.
+    * **the `operator()` special case had no left token boundary**, so
+      any identifier ENDING in `operator` (`myoperator(int)`) matched
+      and was skipped the same way. → `operator` must start a token.
+    * **function-pointer FIELDS took `except +`** (`int(* fp)(int, int)
+      except +`), which stops stating the member's type and disagreed
+      both with the libclang emitter and with this tool's own handling
+      of `ctypedef void(*H)(int)`. → a `(` followed by `*` is a
+      declarator, not a parameter list.
+    * **`--extern_from ""` lost to the config key**, so the flag
+      documented as winning quietly lost; presence is tested now, and an
+      empty value is refused on BOTH routes. A `"` in the value closed
+      the Cython string early and emitted broken text at exit 0 — the
+      same class of trap as a `#` in a config value — so it is refused
+      too.
+    * **the option parser split every repeatable value on commas**
+      (cxxopts' `CXXOPTS_VECTOR_DELIMITER`), so
+      `--extra_cimport "from m cimport A, B"` arrived as two entries and
+      the second reached the pxd as a stray indented line: invalid
+      Cython, exit 0, no warning. That is the multi-symbol form
+      python-pcl_skbuild's config uses in five places, and a `--typemap`
+      TO like `vector[pair[int, int]]` broke identically. → the
+      delimiter is disabled; nothing here ever means a comma-separated
+      list, since every repeatable option is passed once per value.
+
+    All five were silent — no stderr, no `# skipped:` comment — which is
+    why the fixture now asserts by CONTENT and `cross_base.h` grew a
+    second exported name so the options block cimports two symbols. Each
+    assertion was mutation-tested: reverting a fix and rebuilding turns
+    the block red (`operator-lt operator-le name-ending-in-operator
+    function-pointer-field`, and `multi-symbol --extra_cimport was
+    split`).
+
+56. ~~generating all 68 of python-pcl_skbuild's mirror headers through
+    this tool produced pxd that cython rejected, for four unrelated
+    reasons — the last barrier between the delegation backend and the
+    real pipeline~~:
+
+    * **foreign-namespace qualifiers survived** (limitation 2c).
+      `stripNamespaceQualifiers` removes the namespaces being EMITTED, so
+      a shim in `pclcompat` naming `pcl::CropBox` emitted
+      `pcl::CropBox[pcl::PointXYZ]`, and `::` is not Cython. → a pass
+      resolves a qualified name whose TAIL is already known — cimported
+      (including via `--extra_cimport`) or declared in this file — to that
+      bare name, which is how the Python implementation handles it:
+      Cython has no qualification for a cimported name, so the cimport IS
+      the statement of what the bare name means. An UNKNOWN tail is not
+      guessed at; it becomes a `# skipped:` comment naming the reason.
+      This also required tracking every name a cimport line brings in:
+      the dedup key is its last token, so `cimport PointXYZ, Normal` had
+      only ever registered `Normal`.
+    * **any identifier CONTAINING `const` was corrupted.**
+      `normalizeDeclSpacing` searched for the substring, so `reconstruct`
+      became `re ruct` (a space inserted either side, then
+      `dropValueParamConst` ate the middle), `constant_value` became
+      `ant_value` and `const_pointer` became `const _pointer` — silently,
+      in output cython then rejected. → the scan respects word
+      boundaries, and the `const<letter>` direction is gone entirely: it
+      cannot be told from `constant_value` / `constructor` /
+      `const_pointer`, and libclang prints the keyword with a separator
+      anyway, so there was nothing real to recover there.
+    * **Python keywords used as parameter names.** `in` is a legal C++
+      name (PCL's transform shims use it) and a syntax error in a pxd. →
+      suffixed with `_`, as the libclang emitter does.
+    * **C++ default arguments.** A pxd cannot carry one, and `=*` — the
+      .pyx spelling — is rejected inside `cdef extern` too (probed: it is
+      only for template parameter defaults). → they expand into one
+      declaration per callable arity, matching the libclang emitter, so a
+      caller can still omit them.
+
+    Measured on the pipeline, generating every header with its own
+    config (extern_from, extra_cimports, typemap, `--except_plus
+    --no_nogil`): **68/68 now compile under cython** with the siblings on
+    the include path — 0 before this entry — and 57 of the 68 are
+    line-for-line the committed libclang output (4 exactly, 53 modulo
+    cimport order). Gating fixture `tests/input_options/name_resolution.h`
+    plus `tests/configs/name_resolution.conf` cover all four rules and
+    the skip path.
+
+    The 11 that still differ do so benignly and all compile: this tool
+    drops a `const` on a BY-VALUE parameter where the Python one keeps it,
+    it keeps a namespace-scope constant's initializer (`int X=1`) where
+    the Python one emits `const int X`, and enum member values follow #42.
+    One real fidelity gap remains there — a function-pointer `ctypedef`
+    loses its parameter names and its `shared_ptr` wrapper
+    (`void(*Fn)(PointCloud[PointXYZ], void*)` for
+    `void(*)(shared_ptr<PointCloud<PointXYZ>>, void*)`) — recorded as
+    limitation 2d.
+
+57. ~~#56 shipped with five defects, one of which INVERTED the never-silent
+    rule it was meant to serve~~ (found by the pxd-reviewer):
+
+    * **a glued prefix was silently deleted, producing a WRONG TYPE.** A
+      function-pointer typedef's parameter list dropped its template
+      brackets, so `void(*)(shared_ptr<pcl::PointCloud<pcl::PointXYZ>>,
+      void*)` emitted `shared_ptrpcl::PointCloud[pcl::PointXYZ]` — which
+      cython rejected loudly. #56's resolution pass then widened left over
+      `shared_ptrpcl` and "resolved" it to `PointCloud`, giving a pxd
+      cython ACCEPTS and `g++` rejects at the call site (`invalid
+      conversion from void(*)(PointCloud, void*)`). A loud failure became
+      a silent one. → fixed at the source: inside a function-pointer
+      typedef's parameter list the `<`/`>` now become `[`/`]` like
+      everywhere else, so the name is never glued and the pass has nothing
+      to mis-resolve. `compat/grabber_callback.h` now emits
+      `shared_ptr[PointCloud[PointXYZ]]`, matching the libclang output but
+      for the parameter names.
+    * **a `::` with no qualifier NAME before it glued the tail.** After the
+      angle->square pass a dependent name reads `vector[int]::iterator`;
+      `]` is not an identifier character, so the left-widening found
+      nothing, deleted just the `::`, and emitted `vector[int]iterator` —
+      invalid, with no skip comment. → resolution requires a leading
+      segment; otherwise the declaration skips with its reason.
+    * **pass order lost declarations whose only `::` was in a DEFAULT.**
+      `float lo = -std::numeric_limits<float>::max()` (how real
+      `pcl/io/pcd_io.h` is written) made the skip pass comment out a
+      declaration whose parameter types were all expressible — the
+      offending text is deleted a few passes later. → default expansion
+      moved ahead of the qualified/skip passes.
+    * **the local-name harvest saw only classes**, so `typedef` / `using` /
+      `union` names declared in the very same pxd were reported
+      unresolvable and dropped.
+    * **the keyword rule was parameter-only**, so a DATA MEMBER named `in`
+      or `lambda` (ordinary C++) reached cython as an "Empty declarator"
+      and failed the whole file, silently.
+
+    The 68-header measurement is unchanged at 68/68 compiling and 57/68
+    line-for-line, but now with **zero `# skipped:` comments** — nothing is
+    dropped, loudly or otherwise. `name_resolution.h` grew a case for each
+    defect; every assertion was checked to fail without its fix.
+
+58. ~~batch `--config` mode was libclang-only, so a config-driven pipeline
+    (python-pcl_skbuild's `generate.py`) could not be pointed at this
+    tool at all — the last of the reasons listed under limitation 2b~~ →
+    `--namespace NS` (repeatable; also a repeatable `namespace = ` config
+    key) keeps only the `cdef extern from ... namespace "NS"` blocks named,
+    with the Python filter's EXACT-match semantics: `pcl` keeps `pcl` but
+    not `pcl::io` (that config writes `namespaces = ["pcl::io"]` for
+    pcd_io.h on purpose), and the file-level block is `::` — the C++
+    spelling of the global namespace — or an empty config value. It runs
+    before import hoisting, so the cimports interleaved with a dropped
+    block go with it. On the Python side `generate_pxd_cppast` gained
+    `namespaces`, `run_config` a `backend=` parameter that sends every job
+    through the delegation backend (a typemap entry's `cimport` becomes an
+    `--extra_cimport`; a job carrying `include`/`exclude`, `pyx_scaffold`,
+    C mode, `compile_db`, `extra_args` or `macros = false` is a
+    `ValueError` naming the job and the option, never a fall-back), and
+    the CLI's `--config` + `--backend cppast` refusal is gone.
+    One trap found on the way: cxxopts DROPS an empty argument before
+    storing it, so `--namespace ""` arrived as no entry at all, and an
+    empty list means "no filter" — the caller asked for the file-level
+    block only and silently got every block. Each dropped empty is now
+    recovered from the option count, and `::` is accepted so nothing has
+    to depend on an empty argument surviving a shell.
+    A second trap, caught by re-measuring python-pcl_skbuild's 68 headers
+    through the real `run_config` path rather than trusting the fixture:
+    the first cut dropped a block's interleaved cimports WITH the block,
+    on the theory that they belonged to it. They do not — the emitter
+    attaches `from libcpp.vector cimport vector` to whichever block is
+    open when the include or first reference is seen — so five compat
+    shims lost the `vector` / `string` / `shared_ptr` cimport their KEPT
+    block needed and stopped compiling (68/68 became 63/68). Import lines
+    are never filtered now; hoisting dedups and an unused cimport is
+    harmless. The fixture's `c` block is the only user of `std::vector`
+    for exactly this reason.
+    Gating: `tests/input_options/namespaces.h` (a file-level declaration,
+    `a`, nested `a::b`, `c`) generated four ways and checked by block
+    count and content; on the Python side a TWO-BACKEND PARITY GATE runs
+    the mini_pcl config through both backends and asserts every
+    declaration the libclang path emits comes out of the cppast path too
+    (the block-level vs per-function `nogil` spelling canonicalised).
+    Measured on the pipeline through `generate_job_cppast` itself — the
+    path a `--backend cppast` switch in its `generate.py` would take,
+    `namespaces` filter applied: **68/68 compile**, 57/68 line-for-line
+    in canonical form (4 exact, 53 modulo cimport order), 0 `# skipped:`.
+    Nothing on this tool's side keeps that pipeline on libclang any more.
+
+59. ~~#58 shipped with three defects~~ (pxd-reviewer):
+
+    * **a dropped block LEAKED through a multi-line import expansion.**
+      `#include <stdint.h>` becomes eight `from libc.stdint cimport ...`
+      lines that are ONE entity string; only its first line carries the
+      block indentation and the continuations sit at column 0. Inside a
+      dropped block those hit the "any other top-level line ends the
+      block" reset, `keep` came back on, and the rest of that block was
+      emitted with no header above it — `Possible inconsistent
+      indentation` from cython, exit 0 from the tool. A single-line
+      `<vector>` include is indented and never triggered it, which is
+      why the fixture passed; a mirror-header shape with `<stdint.h>`
+      plus a file-level typedef reproduced it at once, and so did
+      `--namespace zzz_nomatch` over the committed `c_api.h`. → import
+      lines are excluded from the reset. The fixture now carries exactly
+      that shape.
+    * **`namespace = ::` in a CONFIG FILE matched nothing**, silently:
+      the `::` → `""` normalisation ran before the config entries were
+      appended. → moved after them.
+    * **a `--namespace` that selects nothing was silent** on both
+      backends — an empty pxd but for the hoisted cimports, exit 0. →
+      the tool warns per unmatched name (`--namespace 'pcl' matched no
+      extern block`), and the delegation backend's stderr scrape
+      surfaces it in `GenerationResult.warnings`. (The Python filter
+      stays quiet; parity there is a follow-up.)
+
+    The two-backend parity gate also compared plain line SETS, which
+    cannot see a declaration emitted in the wrong block. It now keys
+    every line by its extern block. That is what made limitation 2e
+    visible (closed by #60).
+
+60. ~~A file-level declaration AFTER a namespace block landed inside
+    that block~~ (limitation 2e, found by the reviewer probing #58). The
+    file-level `cdef extern from "file":` header was written once, at
+    file start, and never re-opened after a namespace exit, so
+    `namespace a { ... } int after();` declared `after()` under
+    `namespace "a"`: Cython linked it as `a::after`, `--namespace a` kept
+    it in the wrong place and `--namespace ::` dropped it. → the header
+    emitter now tracks whether the open block is the file-level one and
+    re-opens it before the first file-level entity that follows a
+    namespace block (what the Python emitter already did); a namespace
+    re-opened after that gets its header again. `namespaces.h` carries
+    both shapes, and the gate asserts the header standing above each
+    trailing entity in every filtered run and the unfiltered one. None
+    of python-pcl_skbuild's 68 mirror headers has this shape, so the
+    committed pxd are unchanged.
+
+    The Python filter's silence on a no-match `--namespace` (the parity
+    follow-up #59 left) is closed in the same change: `parse_header`
+    records every namespace that reached the filter and warns, in the
+    C++ tool's exact wording, for each configured name it never saw.
+
+61. ~~#60's Python warning shipped with two defects, and the C++ tool's
+    notion of "matched" had a hole of its own~~ (pxd-reviewer probing
+    #60):
+
+    * the Python check keyed on namespaces that REACHED the filter, so a
+      namespace holding only a `using namespace` directive or an alias
+      counted as matched and the pxd came out empty, silently;
+    * it ran BEFORE the macro pass, which can supply the file-level block
+      by itself, so `--namespace ::` on `#define LIMIT 42` plus a
+      namespace warned falsely while emitting that very block;
+    * the C++ pass counted a header as matched when it was KEPT — but the
+      file-start header is written unconditionally and a using-only
+      namespace gets one too, both dropped as empty further down — so
+      `--namespace ::` on a header with no file-level declaration was
+      silent (pre-existing since #58).
+
+    → "matched" now means a block with a body came out, on both sides:
+    the Python check runs after the macro pass and keys on the blocks
+    that hold entities; the C++ pass looks past blank and import lines
+    for an indented body before counting a header. `namespaces_empty.h`
+    (no file-level declaration, a using-only namespace) gates both, and
+    the backend test runs it through both backends.
+
+62. ~~Nested types inside a class came out wrong four ways~~ (pxd-reviewer
+    probing #60, then widened by probing the shape):
+
+    * `cdef struct In:` / `cdef cppclass Inner:` under a `cdef cppclass
+      K:` — cython: `Expected an identifier, found 'cdef'`. The enum
+      emitter knew to omit `cdef` inside a class; the record emitters
+      never did, and the promotion pass (#49) stripped it only inside a
+      struct it had just promoted. → every block header below the
+      extern-block level drops `cdef`, in one pass.
+    * a struct holding a nested type stayed `cdef struct`, whose body
+      admits fields only. → it promotes to `cdef cppclass` like a struct
+      with methods or member typedefs does.
+    * `enum class Kind` was emitted as a plain `enum`, so its enumerators
+      would be referenced unscoped and fail at C++ compile time — a
+      silent one. → `cpp_enum::is_scoped()` keeps the `class`
+      (`cdef enum class Top:` at block level, `enum class Kind:` nested;
+      both accepted by cython 3.3, and the libclang emitter's spelling).
+    * the ENCLOSING class's private members leaked after a nested struct:
+      kind and access were two single flags, so `struct In {...};`
+      inside `class K` turned K into "a struct" (public by default) for
+      the rest of its body — `int hidden();` after it came out. A nested
+      *class* did not leak but left its own last access state behind.
+      → the pair is saved when a class/struct is entered and restored on
+      its exit (the templated inner `class_t` is skipped with both
+      events, so pushes and pops pair up).
+
+    `nested_types.h` carries all four shapes plus a nested struct in a
+    class template (`Box.Item first()` inside `cdef cppclass Box[T]`,
+    `Box[int].Item` at a use site — both accepted), gated by content and
+    by cython on the pxd AND a use-site pyx; the backend test asserts the
+    same lines out of both backends. python-pcl_skbuild's 68 mirror
+    headers have no nested type in a class (its RangeImage mirror hoists
+    `CoordinateFrame` out), so the committed pxd are unchanged.
+
+
 ### Compilation-database mode (real PCL, verified on Linux)
 
 `--database_dir <build> --database_file <a-TU-in-the-db>` feeds cppast the
@@ -422,12 +777,9 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    the fetched `status.h`; the committed `statuslike.h` covering the rest of
    that header passes.)
 1b. ~~Cross-header names do not resolve~~ — closed by #51's
-   `--extra_cimport` / `--typemap`; the nine-header sweep is 8/9 with the
-   options composed. What remains open is convenience, not capability: the
-   flags are per-invocation, so a config-file driver (the pcl_headers.toml
-   role in python-pcl_skbuild's pipeline) would spare callers the
-   repetition. types.h itself stays out of scope (template
-   metaprogramming).
+   `--extra_cimport` / `--typemap` and #52's `--config`; the nine-header
+   sweep is 8/9 with the options composed. types.h itself stays out of
+   scope (template metaprogramming).
 1c. ~~Member FUNCTION templates lose their parameter list~~ — fixed by
    #48; PCLPointCloud2's `at` now emits `T& at[T](...)` and its only
    remaining sweep failures are family 1b names (PCLHeader, uindex_t).
@@ -435,6 +787,23 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    silently~~ — fixed by #49 (method-bearing structs promote).
 2. **Move semantics** (`T&&`) emit but Cython only warns ("Rvalue-reference as
    function argument not supported") — harmless but noise.
+2c. ~~Foreign-namespace qualifiers survive~~ — closed by #56; an
+   unresolvable tail now skips with a reason instead of emitting `::`.
+2d. **A function-pointer `ctypedef` loses its parameter NAMES** (the
+   types are correct as of #57): `ctypedef void(*Fn)(shared_ptr[Widget],
+   void*)` where the libclang emitter writes `(shared_ptr[Widget] w,
+   void* user_data)`. Names in an extern declaration are documentation, so
+   this is cosmetic.
+2e. ~~A file-level declaration AFTER a namespace block lands inside that
+    block~~ — fixed by #60; the file-level block is re-opened, on both
+    backends identically.
+2b. **No NAME filtering.** `--include-name` / `--exclude-name` have no
+   counterpart flags here (namespace filtering does, since #58), so the
+   Python `--backend cppast` path refuses them rather than degrading (as
+   it does for `--no-macros`, `--compile-db`, `--pyx-scaffold` and C
+   mode). python-pcl_skbuild's configs use none of them, and batch
+   `--config` mode now drives this backend, so nothing on this list keeps
+   that pipeline on libclang any more — only the choice to stay there.
 3. **Real PCL/draco headers** need their full include tree on `-I` to parse
    (they `#include` siblings); the committed `templates.h` / `vectord.h` /
    `statuslike.h` fixtures exercise the same constructs self-containedly.

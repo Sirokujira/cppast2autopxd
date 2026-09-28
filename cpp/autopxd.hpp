@@ -21,6 +21,7 @@
 #include <cppast/cpp_entity_kind.hpp>        // for the cpp_entity_kind definition
 #include <cppast/cpp_forward_declarable.hpp> // for is_definition()
 #include <cppast/cpp_namespace.hpp>          // for cpp_namespace
+#include <cppast/cpp_enum.hpp>              // for cpp_enum::is_scoped() (#62)
 #include <cppast/cpp_function_template.hpp>  // for cpp_function_template (free fn templates)
 #include <cppast/cpp_template_parameter.hpp> // for template parameter names
 
@@ -100,6 +101,22 @@ private:
     std::vector<std::string> extraCimports;
     std::vector<std::string> typemapSubstitutions;
 
+    // --extern_from: the path written into `cdef extern from "..."`. The pxd is
+    // generated from a self-contained MIRROR header, but the C++ compiler must
+    // include the REAL one (`pcl/point_cloud.h`), so the two names differ. Empty
+    // means "use the parsed file's basename", the previous behaviour.
+    std::string externFromOverride;
+
+    // --no_nogil / --except_plus: the counterparts of the Python
+    // implementation's `nogil` and `except_plus` emitter options.
+    bool emitNogil = true;
+    bool emitExceptPlus = false;
+
+    // --namespace: keep only the `cdef extern from ... namespace "X"` blocks
+    // whose X is listed (exact match, like the Python filter: "pcl" does not
+    // cover "pcl::io"; "" is the file-level block). Empty = keep everything.
+    std::vector<std::string> allowedNamespaces;
+
     // Template type-parameter names of the function template currently being
     // entered. cppast represents a free function template as a
     // function_template_t proxy wrapping the real function_t; the proxy carries
@@ -126,6 +143,12 @@ private:
     std::string const_str;
     bool isClass;
     bool isClassAccessPublic;
+    // #62: (isClass, isClassAccessPublic) of the ENCLOSING class, saved when
+    // a nested class/struct is entered and restored on its exit. Both were
+    // single flags before, so `struct In {...};` inside `class K` turned K
+    // into "a struct" for the rest of its body and its private members
+    // leaked into the pxd.
+    std::vector<std::pair<bool, bool>> classCtxStack;
     bool isEnumClassInFlag;
     bool isAnonymous;
     int indentCount;
@@ -143,8 +166,12 @@ public:
     // AutoPxd(const std::string& filename, const std::string& output_folder = ".")
     AutoPxd(const std::string& filename, const std::string& output_folder = ".", const std::string& xml_folder = "",
             const std::vector<std::string>& extra_cimports = {},
-            const std::vector<std::string>& typemap_substitutions = {})
-        : extraCimports(extra_cimports), typemapSubstitutions(typemap_substitutions)
+            const std::vector<std::string>& typemap_substitutions = {},
+            const std::string& extern_from = "", bool emit_nogil = true, bool emit_except_plus = false,
+            const std::vector<std::string>& allowed_namespaces = {})
+        : extraCimports(extra_cimports), typemapSubstitutions(typemap_substitutions),
+          externFromOverride(extern_from), emitNogil(emit_nogil), emitExceptPlus(emit_except_plus),
+          allowedNamespaces(allowed_namespaces)
     {
         // そのまま設定すると、絶対パスになるため
         // 相対パスとして設定すること。
@@ -157,8 +184,10 @@ public:
         int ext_i = base_filename.find_last_of(".");
         std::string filename_without_ext = base_filename.substr(path_i, ext_i - path_i);
         std::string extname = base_filename.substr(ext_i, base_filename.size() - ext_i);
-        // header basename for the `cdef extern from` line
-        header_name = base_filename.substr(path_i);
+        // header basename for the `cdef extern from` line, unless --extern_from
+        // named the real header the C++ compiler has to include instead.
+        header_name = externFromOverride.empty() ? base_filename.substr(path_i)
+                                                 : externFromOverride;
 
         // autopxd_file = base_filename + ".pxd";
         // autopxd_file = filename_without_ext + ".pxd";
@@ -225,18 +254,25 @@ public:
         bool container_start = true;
         bool isIndentCountUp = false;
 
+        // Whether the block currently open in refLines is the FILE-LEVEL one
+        // (`cdef extern from "file":`, written once at file start). A
+        // namespace header closes it; a file-level entity after that has to
+        // re-open it (#60).
+        bool fileLevelBlockOpen = true;
+
         // Emit the `cdef extern from "file" namespace "ns::...":` header once,
         // before the first top-level entity inside a namespace. This must run
         // whether that entity is the last child or not (a namespace containing a
         // single class takes the last_child path), so it is shared by both
         // container_entity_enter branches below.
         auto emitNamespaceHeader = [&]() {
+            if(!container_start) return;
             // Build from currentNamespaceNames (outermost first, kept in sync
             // by the namespace enter/exit events below). The old code drained
             // namespaceStack, which reversed nested namespaces into
             // "traits::pcl" AND emptied the stack, so siblings after a nested
             // namespace lost their qualification entirely.
-            if(!currentNamespaceNames.empty() && container_start)
+            if(!currentNamespaceNames.empty())
             {
                 std::string headerRef = "\n";
                 headerRef += "cdef extern from \"" + header_name + "\" namespace \"";
@@ -247,6 +283,25 @@ public:
                 }
                 headerRef += "\":\n";
                 refLines.push_back(headerRef);
+                fileLevelBlockOpen = false;
+                container_start = false;
+            }
+            else if(!fileLevelBlockOpen)
+            {
+                // #60: a file-level entity AFTER a namespace block. Before
+                // this branch it was appended to whatever block was open
+                // last -- the namespace's -- so `int after();` following
+                // `namespace a { ... }` was declared under `namespace "a"`
+                // and Cython linked it as `a::after` (limitation 2e). The
+                // Python emitter re-opens the file-level block here; do the
+                // same. (At file start the block is already open, so nothing
+                // is emitted twice. An include/using/macro entity reaches
+                // this point too and writes nothing, so the re-opened block
+                // CAN come out empty; the drop-empty-blocks pass removes it,
+                // and #61 keeps such a header from counting as a
+                // --namespace match.)
+                refLines.push_back("\ncdef extern from \"" + header_name + "\":\n");
+                fileLevelBlockOpen = true;
                 container_start = false;
             }
         };
@@ -394,6 +449,14 @@ public:
                     // namespace exits re-entered the namespace_t branch and
                     // never reached this decrement — keep that behavior.
                     indentCount--;
+                    if((e.kind() == cppast::cpp_entity_kind::class_t ||
+                        e.kind() == cppast::cpp_entity_kind::class_template_t) &&
+                       !classCtxStack.empty())
+                    {
+                        isClass = classCtxStack.back().first;
+                        isClassAccessPublic = classCtxStack.back().second;
+                        classCtxStack.pop_back();
+                    }
                 }
                 std::cout << "indentCount: ";
                 std::cout << indentCount;
@@ -479,6 +542,15 @@ public:
                 // (non-namespaced) extern block and link against ::fn.
                 emitNamespaceHeader();
 
+                // #62: save the enclosing class's kind/access state before a
+                // nested class/struct overwrites it; the matching exit above
+                // restores it. The templated inner class_t never gets here
+                // (skipped with both events), so pushes and pops pair up.
+                if(info.event == cppast::visitor_info::container_entity_enter &&
+                   (e.kind() == cppast::cpp_entity_kind::class_t ||
+                    e.kind() == cppast::cpp_entity_kind::class_template_t))
+                    classCtxStack.push_back({isClass, isClassAccessPublic});
+
                 // print_entity(out, e);
                 // autopxd_entity(out, e);
                 // AutoPxd に専用の関数を用意する。(そっちの方が対処が楽なため)
@@ -522,6 +594,98 @@ public:
             }
         }
 
+        // --namespace: drop every extern block the caller did not ask for.
+        // A config entry states which namespace a pxd is FOR (python-pcl_skbuild
+        // writes `namespaces = ["pcl::io"]` for pcd_io.h), and the Python
+        // filter is an EXACT match on the block's full name — so "pcl" keeps
+        // `namespace "pcl"` only, "pcl::io" keeps the nested block, and "" the
+        // file-level one. This runs before import hoisting, and IMPORT LINES
+        // ARE NEVER DROPPED: the emitter interleaves a `from ... cimport ...`
+        // with whichever block happens to be open when the include or the
+        // first reference is seen, not with the block that needs it — five of
+        // python-pcl_skbuild's compat shims lost their `vector` / `string` /
+        // `shared_ptr` cimport with the file-level block and stopped
+        // compiling. Hoisting dedups, and an unused cimport is harmless.
+        if(!allowedNamespaces.empty())
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(body);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            auto blockNamespace = [](const std::string& hdr) -> std::string {
+                size_t k = hdr.find(" namespace \"");
+                if(k == std::string::npos) return std::string();     // file-level
+                size_t b = k + 12, e = hdr.find('"', b);
+                return e == std::string::npos ? std::string() : hdr.substr(b, e - b);
+            };
+            auto isImportLine = [](const std::string& raw) {
+                std::string t = raw;
+                size_t k = t.find_first_not_of(" \t");
+                t.erase(0, k == std::string::npos ? t.size() : k);
+                return (t.rfind("from ", 0) == 0 &&
+                        t.find(" cimport ") != std::string::npos)
+                       || t.rfind("cimport ", 0) == 0;
+            };
+            bool keep = true;
+            std::vector<std::string> matched;
+            std::string filtered;
+            for(size_t i = 0; i < lines.size(); ++i)
+            {
+                const std::string& l = lines[i];
+                bool isImport = isImportLine(l);
+                bool isHeader = l.rfind("cdef extern from", 0) == 0 &&
+                                !l.empty() && l.back() == ':';
+                if(isHeader)
+                {
+                    std::string ns = blockNamespace(l);
+                    keep = std::find(allowedNamespaces.begin(), allowedNamespaces.end(), ns)
+                           != allowedNamespaces.end();
+                    // "matched" means a block with a BODY. The file-level
+                    // header is written unconditionally at file start, and a
+                    // namespace holding only a using-directive still gets
+                    // one; both are dropped as empty further down, so
+                    // counting them here made `--namespace ::` on a header
+                    // with no file-level declaration -- and `--namespace x`
+                    // on a re-export-only `x` -- silent (#61). Blank and
+                    // import lines are not a body; the next other line is.
+                    bool hasBody = false;
+                    for(size_t j = i + 1; j < lines.size(); ++j)
+                    {
+                        if(lines[j].find_first_not_of(" \t") == std::string::npos) continue;
+                        if(isImportLine(lines[j])) continue;
+                        hasBody = lines[j][0] == ' ' || lines[j][0] == '\t';
+                        break;
+                    }
+                    if(keep && hasBody &&
+                       std::find(matched.begin(), matched.end(), ns) == matched.end())
+                        matched.push_back(ns);
+                }
+                else if(!isImport && !l.empty() && l[0] != ' ' && l[0] != '\t')
+                {
+                    // Any other top-level line ends the block it followed.
+                    // Imports are excluded from this reset ON PURPOSE: a
+                    // multi-symbol include expansion (`<stdint.h>` -> eight
+                    // `from libc.stdint cimport ...` lines) is one entity
+                    // string whose continuation lines sit at column 0, and
+                    // treating them as "top-level" re-enabled `keep` inside a
+                    // DROPPED block, leaking the rest of that block with no
+                    // header above it -- an indentation error at exit 0.
+                    keep = true;
+                }
+                if(keep || isImport) { filtered += l; filtered += "\n"; }
+            }
+            body = filtered;
+            // never silent: a --namespace that selected nothing is almost
+            // certainly a typo (`pcl` for `pcl::io`), and the file would
+            // otherwise come out empty but for the hoisted cimports.
+            for(const auto& ns : allowedNamespaces)
+                if(std::find(matched.begin(), matched.end(), ns) == matched.end())
+                    std::cerr << "warning: --namespace '" << (ns.empty() ? "::" : ns)
+                              << "' matched no extern block in this header\n";
+        }
+
         // Cython requires `from ... cimport ...` / `cimport ...` at module
         // top-level, BEFORE any `cdef extern from` block. The per-entity emitter
         // interleaves them with the extern header, so hoist them: split the
@@ -529,6 +693,37 @@ public:
         // lines, and emit them first followed by the remaining body.
         std::vector<std::string> importLines;
         std::vector<std::string> importedSymbols;
+        // Every name a cimport line brings into scope. importedSymbols is the
+        // DEDUP KEY (the last token, which is all the emitter ever produces);
+        // this is the full set, because a caller's --extra_cimport may name
+        // several (`cimport PointXYZ, Normal`) and the qualified-name pass
+        // below has to know about all of them.
+        std::vector<std::string> importedNames;
+        auto recordImportedNames = [&importedNames](const std::string& imp) {
+            size_t k = imp.rfind("cimport ");
+            if(k == std::string::npos) return;
+            std::string list = imp.substr(k + 8);
+            size_t b = 0;
+            while(b <= list.size())
+            {
+                size_t e = list.find(',', b);
+                std::string name = list.substr(b, e == std::string::npos
+                                                      ? std::string::npos
+                                                      : e - b);
+                size_t f = name.find_first_not_of(" \t");
+                size_t l = name.find_last_not_of(" \t");
+                if(f != std::string::npos)
+                {
+                    name = name.substr(f, l - f + 1);
+                    // `cimport x as y` binds the ALIAS
+                    size_t as = name.rfind(" as ");
+                    if(as != std::string::npos) name = name.substr(as + 4);
+                    if(!name.empty()) importedNames.push_back(name);
+                }
+                if(e == std::string::npos) break;
+                b = e + 1;
+            }
+        };
         // --extra_cimport lines go in FIRST: the caller's statement of what a
         // sibling-header name means (`from PCLHeader cimport PCLHeader`) wins
         // the by-symbol dedup against anything the emitter derived.
@@ -540,6 +735,7 @@ public:
             {
                 importedSymbols.push_back(symbol);
                 importLines.push_back(imp);
+                recordImportedNames(imp);
             }
         }
         std::string rest;
@@ -603,6 +799,7 @@ public:
                     {
                         importedSymbols.push_back(symbol);
                         importLines.push_back(trimmed);
+                        recordImportedNames(trimmed);
                     }
                 }
                 else
@@ -862,6 +1059,223 @@ public:
         //   - rvalue references (T&&): move ctors/assignment are not callable
         //     from Cython and only produce parser warnings/noise
         // Each dropped line is kept as a comment for auditability.
+        // C++ DEFAULT ARGUMENTS expand into overloads.
+        //
+        // A pxd cannot carry a default: `bool binary_mode=false` is a syntax
+        // error, and `=*` — the .pyx spelling — is rejected inside `cdef
+        // extern` too (probed against the compiler; it is only for template
+        // parameter defaults). The libclang emitter answers this by emitting
+        // one declaration per callable arity, and so does this pass, so a
+        // caller can still omit the defaulted arguments.
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            std::vector<std::string> out;
+            for(const auto& l : lines)
+            {
+                std::string t = l;
+                size_t ind = 0;
+                while(ind < t.size() && (t[ind]==' '||t[ind]=='\t')) ++ind;
+                std::string body = t.substr(ind);
+                if(body.empty() || body[0]=='#' || body.back()==':' ||
+                   body.rfind("ctypedef",0)==0 || body.rfind("cdef ",0)==0 ||
+                   body.rfind("from ",0)==0 || body.rfind("cimport ",0)==0)
+                { out.push_back(l); continue; }
+                size_t open_ = findParamListOpen(body);
+                if(open_ == std::string::npos) { out.push_back(l); continue; }
+                // matching close paren of the parameter list
+                int depth = 0; size_t close_ = std::string::npos;
+                for(size_t i = open_; i < body.size(); ++i)
+                {
+                    if(body[i]=='(') depth++;
+                    else if(body[i]==')') { if(--depth==0) { close_=i; break; } }
+                }
+                if(close_ == std::string::npos) { out.push_back(l); continue; }
+                std::string head = body.substr(0, open_ + 1);
+                std::string tail = body.substr(close_);          // ") nogil const"
+                std::string params = body.substr(open_ + 1, close_ - open_ - 1);
+                // split on TOP-LEVEL commas
+                std::vector<std::string> parts;
+                {
+                    int d = 0; size_t b = 0;
+                    for(size_t i = 0; i <= params.size(); ++i)
+                    {
+                        if(i == params.size() || (params[i]==',' && d==0))
+                        { parts.push_back(params.substr(b, i-b)); b = i+1; }
+                        else if(params[i]=='('||params[i]=='['||params[i]=='<') d++;
+                        else if(params[i]==')'||params[i]==']'||params[i]=='>') { if(d) d--; }
+                    }
+                }
+                // strip a top-level default from each part; note the first one
+                size_t firstDefault = parts.size();
+                for(size_t i = 0; i < parts.size(); ++i)
+                {
+                    int d = 0;
+                    for(size_t k = 0; k < parts[i].size(); ++k)
+                    {
+                        char c = parts[i][k];
+                        if(c=='('||c=='['||c=='<') d++;
+                        else if(c==')'||c==']'||c=='>') { if(d) d--; }
+                        else if(c=='=' && d==0)
+                        {
+                            if(k+1 < parts[i].size() && parts[i][k+1]=='=') break;
+                            if(k>0 && std::string("<>!+-*/%&|^=").find(parts[i][k-1])
+                                          != std::string::npos) break;
+                            parts[i] = parts[i].substr(0, k);
+                            while(!parts[i].empty() &&
+                                  (parts[i].back()==' '||parts[i].back()=='\t'))
+                                parts[i].pop_back();
+                            if(i < firstDefault) firstDefault = i;
+                            break;
+                        }
+                    }
+                }
+                if(firstDefault == parts.size()) { out.push_back(l); continue; }
+                for(size_t n = firstDefault; n <= parts.size(); ++n)
+                {
+                    std::string joined;
+                    for(size_t i = 0; i < n; ++i)
+                    {
+                        if(i) joined += ",";
+                        joined += parts[i];
+                    }
+                    // a trailing empty parameter list must not keep a stray space
+                    size_t f = joined.find_first_not_of(" \t");
+                    joined = (f == std::string::npos) ? "" : joined.substr(f);
+                    out.push_back(std::string(ind, ' ') + head + joined + tail);
+                }
+            }
+            rest.clear();
+            for(const auto& l : out) { rest += l; rest += "\n"; }
+        }
+
+        // NOTE ON ORDER: this runs BEFORE the qualified-name and skip passes.
+        // A default value can be the only place a `::` appears
+        // (`float lo = -std::numeric_limits<float>::max()`), and the skip pass
+        // would then comment out a declaration whose parameter types are all
+        // perfectly expressible — the default text it tripped on is deleted
+        // right here.
+        // Resolve QUALIFIED names that name another namespace's types.
+        //
+        // stripNamespaceQualifiers removes the namespaces being emitted, not
+        // names imported from elsewhere, so a shim in `pclcompat` whose
+        // signatures mention `pcl::CropBox` emitted `pcl::CropBox[pcl::PointXYZ]`
+        // — `::` is not Cython, and the whole file failed to compile. This is
+        // the C++-shim case the Python implementation resolves through the
+        // cimport: Cython has no qualification for a cimported name, so the
+        // cimport IS the statement of what the bare name means. A qualified
+        // name whose TAIL is already known — cimported (including via
+        // --extra_cimport) or declared in this file — becomes that bare name;
+        // an unknown tail is left alone for the skip pass below to comment
+        // out with a reason, never silently mangled.
+        {
+            std::vector<std::string> knownNames = importedNames;
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            // names declared HERE are equally usable bare
+            for(const auto& l : lines)
+            {
+                std::string t = l;
+                size_t p0 = 0; while(p0 < t.size() && t[p0] == ' ') p0++;
+                t = t.substr(p0);
+                // a `ctypedef <anything> NAME` binds its LAST token, and a
+                // union declares a usable name like a struct does; missing
+                // both meant a locally-declared type could be reported as
+                // unresolvable and dropped.
+                if(t.rfind("ctypedef ", 0) == 0)
+                {
+                    size_t e = t.size();
+                    while(e > 0 && !(std::isalnum((unsigned char)t[e-1]) || t[e-1]=='_')) e--;
+                    size_t b = e;
+                    while(b > 0 && (std::isalnum((unsigned char)t[b-1]) || t[b-1]=='_')) b--;
+                    if(e > b) knownNames.push_back(t.substr(b, e - b));
+                    continue;
+                }
+                static const char* heads[] = { "cdef cppclass ", "cdef struct ",
+                                               "cdef enum ", "cdef union ",
+                                               "cppclass ", "struct ", "enum ",
+                                               "union " };
+                for(const char* h : heads)
+                {
+                    size_t hl = std::char_traits<char>::length(h);
+                    if(t.compare(0, hl, h) != 0) continue;
+                    size_t b = hl, e = b;
+                    while(e < t.size() &&
+                          (std::isalnum((unsigned char)t[e]) || t[e] == '_')) e++;
+                    if(e > b) knownNames.push_back(t.substr(b, e - b));
+                    break;
+                }
+            }
+
+            auto isIdentChar = [](char c) {
+                return std::isalnum((unsigned char)c) || c == '_';
+            };
+            for(auto& l : lines)
+            {
+                // the extern header's `namespace "a::b"` string is not a type
+                if(l.find("cdef extern from") != std::string::npos) continue;
+                size_t pos;
+                while((pos = l.find("::")) != std::string::npos)
+                {
+                    // widen left over `A::B::` chains (and a leading global `::`)
+                    size_t start = pos;
+                    for(;;)
+                    {
+                        size_t b = start;
+                        while(b > 0 && isIdentChar(l[b - 1])) b--;
+                        if(b >= 2 && l.compare(b - 2, 2, "::") == 0) { start = b - 2; continue; }
+                        start = b;
+                        break;
+                    }
+                    // No qualifier NAME precedes the `::` — it qualifies an
+                    // expression, as in a dependent name (`vector[int]::iterator`
+                    // once the angle->square pass has run). Deleting it there
+                    // would glue the tail onto the previous token and emit
+                    // silently broken text, so leave it for the skip pass.
+                    bool leadingSegment = start < pos;
+                    // the tail is the identifier after the LAST `::`
+                    size_t last = pos;
+                    size_t scan = pos;
+                    while(true)
+                    {
+                        size_t e = scan + 2;
+                        while(e < l.size() && isIdentChar(l[e])) e++;
+                        if(e + 1 < l.size() && l.compare(e, 2, "::") == 0)
+                        { last = e; scan = e; continue; }
+                        last = scan;
+                        break;
+                    }
+                    size_t tb = last + 2, te = tb;
+                    while(te < l.size() && isIdentChar(l[te])) te++;
+                    std::string tail = l.substr(tb, te - tb);
+                    if(leadingSegment && !tail.empty() &&
+                       std::find(knownNames.begin(), knownNames.end(), tail)
+                           != knownNames.end())
+                    {
+                        l = l.substr(0, start) + tail + l.substr(te);
+                        continue;
+                    }
+                    // Unknown tail: leave it for the skip pass. Rewrite the
+                    // separator so this loop terminates, using a marker the
+                    // skip pass recognises and no C++ name can contain.
+                    l = l.substr(0, last) + "\x01" + l.substr(last + 2);
+                }
+                // restore any unresolved qualifier for the skip pass's message
+                for(size_t i = 0; i < l.size(); ++i)
+                    if(l[i] == '\x01') { l.replace(i, 1, "::"); ++i; }
+            }
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
         {
             auto hasIdentFrom = [](const std::string& s,
                                    const char* const* deny, size_t n) -> bool {
@@ -950,6 +1364,10 @@ public:
                         why = "operator overload not supported in Cython";
                     else if(body_t.find("&&") != std::string::npos)
                         why = "rvalue references not supported in Cython";
+                    else if(body_t.rfind("#", 0) != 0 &&
+                            body_t.find("::") != std::string::npos)
+                        why = "qualified name from another namespace does not "
+                              "resolve (cimport it, e.g. --extra_cimport)";
                 }
                 if(why)
                 {
@@ -1038,6 +1456,7 @@ public:
 
                 bool hasMemberTypedef = false;
                 bool hasMethod = false;
+                bool hasNestedType = false;
                 for(size_t j = i + 1; j < lines.size(); ++j)
                 {
                     if(lines[j].find_first_not_of(" \t") == std::string::npos)
@@ -1046,6 +1465,21 @@ public:
                         break;                          // dedent: body ended
                     std::string t = lines[j].substr(indentOf(lines[j]));
                     if(t.rfind("ctypedef ", 0) == 0) { hasMemberTypedef = true; break; }
+                    // #62: a NESTED TYPE makes the struct C++-only as well — a
+                    // `cdef struct` body admits fields only, cython rejects a
+                    // `struct Nested:` inside it. Either spelling of the
+                    // nested header counts (the `cdef` is stripped below).
+                    {
+                        std::string nt = t;
+                        while(!nt.empty() && (nt.back() == ' ' || nt.back() == '\t'))
+                            nt.pop_back();
+                        static const char* nestedHeads[] = {
+                            "cdef struct ", "cdef enum ", "cdef enum:", "cdef cppclass ",
+                            "cdef union ", "struct ", "enum ", "enum:", "cppclass ", "union " };
+                        if(!nt.empty() && nt.back() == ':')
+                            for(const char* h : nestedHeads)
+                                if(nt.rfind(h, 0) == 0) { hasNestedType = true; break; }
+                    }
                     // A METHOD makes the struct C++-only too, and Cython
                     // rejects a `const`-qualified method inside `cdef struct`
                     // (`Ops operator+(...) nogil const`, silently broken
@@ -1063,7 +1497,7 @@ public:
                             hasMethod = true;
                     }
                 }
-                if(hasMemberTypedef || isTemplateHeader || hasMethod)
+                if(hasMemberTypedef || isTemplateHeader || hasMethod || hasNestedType)
                 {
                     lines[i] = std::string(p, ' ') + "cdef cppclass " +
                                body_t.substr(structKw.size());
@@ -1087,6 +1521,23 @@ public:
                             lines[j] = std::string(ind, ' ') + bt.substr(5);
                     }
                 }
+            }
+
+            // #62: every block header BELOW the extern-block level drops
+            // `cdef`, not only those inside a promoted struct: `cdef struct
+            // In:` under a `cdef cppclass K:` is a cython syntax error
+            // (`Expected an identifier, found 'cdef'`). The enum emitter
+            // already omitted it inside a class, but the record emitters
+            // never did. Block bodies sit at four spaces; anything deeper
+            // is nested.
+            for(size_t i = 0; i < lines.size(); ++i)
+            {
+                int p = indentOf(lines[i]);
+                if(p <= 4) continue;
+                std::string t = lines[i].substr(p);
+                while(!t.empty() && (t.back() == ' ' || t.back() == '\t')) t.pop_back();
+                if(t.empty() || t.back() != ':' || t.rfind("cdef ", 0) != 0) continue;
+                lines[i] = std::string(p, ' ') + t.substr(5);
             }
 
             rest.clear();
@@ -1175,6 +1626,169 @@ public:
                 }
             }
 
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
+        // PYTHON KEYWORDS used as parameter names.
+        //
+        // Names in an extern declaration are documentation, but cython still
+        // parses them, and legal C++ names like `in` (pcl's transform shims)
+        // are Python keywords: `transformCloud(const PointCloud[PointXYZ]& in,`
+        // was a syntax error. Suffix with `_`, as the libclang emitter does.
+        {
+            static const char* kw[] = {
+                "False","None","True","and","as","assert","async","await",
+                "break","class","continue","def","del","elif","else","except",
+                "finally","for","from","global","if","import","in","is",
+                "lambda","nonlocal","not","or","pass","raise","return","try",
+                "while","with","yield"};
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            for(auto& l : lines)
+            {
+                std::string body = l;
+                size_t ind = 0;
+                while(ind < body.size() && (body[ind]==' '||body[ind]=='\t')) ++ind;
+                std::string t = body.substr(ind);
+                if(t.empty() || t[0]=='#' || t.rfind("from ",0)==0 ||
+                   t.rfind("cimport ",0)==0 || t.find("cdef extern from")!=std::string::npos)
+                    continue;
+                size_t open_ = findParamListOpen(t);
+                if(open_ == std::string::npos)
+                {
+                    // No parameter list: a DATA MEMBER can still be named with
+                    // a keyword (`int in;`, `float lambda;` are ordinary C++
+                    // and `int in` is an "Empty declarator" to cython). The
+                    // name is the last token of the declaration.
+                    if(t.back() == ':' || t.find('=') != std::string::npos) continue;
+                    size_t e = t.size();
+                    while(e > 0 && !(std::isalnum((unsigned char)t[e-1]) || t[e-1]=='_')) e--;
+                    size_t b = e;
+                    while(b > 0 && (std::isalnum((unsigned char)t[b-1]) || t[b-1]=='_')) b--;
+                    if(b == e || b == 0) continue;          // needs a type before it
+                    if(!(t[b-1]==' '||t[b-1]=='\t'||t[b-1]=='*'||t[b-1]=='&')) continue;
+                    std::string name = t.substr(b, e-b);
+                    for(const char* k : kw)
+                        if(name == k)
+                        {
+                            l = std::string(ind, ' ') + t.substr(0, e) + "_" + t.substr(e);
+                            break;
+                        }
+                    continue;
+                }
+                // a parameter NAME is the identifier just before `,` or `)`
+                std::string outp = t;
+                for(size_t i = outp.size(); i-- > open_;)
+                {
+                    if(outp[i] != ',' && outp[i] != ')') continue;
+                    size_t e = i;
+                    while(e > open_ && (outp[e-1]==' '||outp[e-1]=='\t')) e--;
+                    size_t b = e;
+                    while(b > open_ &&
+                          (std::isalnum((unsigned char)outp[b-1]) || outp[b-1]=='_')) b--;
+                    if(b == e) continue;
+                    // must be a NAME, i.e. preceded by whitespace after a type
+                    if(b == open_ || !(outp[b-1]==' '||outp[b-1]=='\t')) continue;
+                    std::string name = outp.substr(b, e-b);
+                    for(const char* k : kw)
+                        if(name == k) { outp.insert(e, "_"); break; }
+                }
+                if(outp != t) l = std::string(ind, ' ') + outp;
+            }
+            rest.clear();
+            for(const auto& l : lines) { rest += l; rest += "\n"; }
+        }
+
+        // --except_plus: append `except +` to every function/method/constructor
+        // so a C++ exception becomes a Python one instead of terminating the
+        // process. The counterpart of the Python implementation's
+        // `except_plus` emitter option, with the two rules the cython compiler
+        // establishes:
+        //
+        //   * ORDER. `const` is only legal AFTER `nogil`, and `except +` only
+        //     before it, so the one accepted spelling of a const method is
+        //     `... except + nogil const`. `const except +`, `except + const`
+        //     and `const nogil` are all syntax errors. With --no_nogil there is
+        //     no separator available, so `except +` wins and `const` is dropped
+        //     (matching the Python emitter).
+        //   * MUTABLE-REFERENCE RETURNS ARE EXEMPT. Cython's try/catch wrapping
+        //     stores the result in a by-value temporary, so `except +` on a
+        //     `T&` accessor (operator[], at, front, back) would silently hand
+        //     out a reference to a copy. Cython's own libcpp declarations do
+        //     the same.
+        //
+        // Runs before the typemap pass; `except +` carries no type name, so the
+        // two are order-independent, but keeping it first leaves the typemap
+        // operating on the final signature text.
+        if(emitExceptPlus)
+        {
+            std::vector<std::string> lines;
+            {
+                std::string line;
+                std::istringstream iss(rest);
+                while(std::getline(iss, line)) lines.push_back(line);
+            }
+            for(auto& l : lines)
+            {
+                std::string t = l;
+                size_t ind = 0;
+                while(ind < t.size() && (t[ind] == ' ' || t[ind] == '\t')) ++ind;
+                t = t.substr(ind);
+                while(!t.empty() && (t.back() == ' ' || t.back() == '\t' || t.back() == '\r'))
+                    t.pop_back();
+                if(t.empty() || t[0] == '#') continue;
+                // Block headers and non-callable declarations never take it.
+                if(t.back() == ':') continue;
+                if(t.rfind("ctypedef", 0) == 0 || t.rfind("cdef ", 0) == 0 ||
+                   t.rfind("from ", 0) == 0 || t.rfind("cimport ", 0) == 0)
+                    continue;
+                size_t paramOpen = findParamListOpen(t);
+                if(paramOpen == std::string::npos) continue;
+                if(t.find(')', paramOpen) == std::string::npos) continue;
+                // `int(* fp)(int, int)` is a function-pointer FIELD, not a
+                // callable: `except +` there stops stating the member's type
+                // and disagrees with both the libclang emitter and this
+                // tool's own handling of `ctypedef void(*H)(int)`.
+                if(paramOpen + 1 < t.size() && t[paramOpen + 1] == '*') continue;
+                if(t.find("except +") != std::string::npos) continue;
+                if(returnsMutableReference(t, paramOpen)) continue;
+
+                // Split off the trailing modifiers our emitters appended.
+                std::string decl = t;
+                bool hadNogil = false, hadConst = false;
+                const std::string nogilConst = " nogil const";
+                const std::string nogilOnly = " nogil";
+                const std::string constOnly = " const";
+                if(decl.size() > nogilConst.size() &&
+                   decl.compare(decl.size() - nogilConst.size(), nogilConst.size(), nogilConst) == 0)
+                {
+                    decl.erase(decl.size() - nogilConst.size());
+                    hadNogil = hadConst = true;
+                }
+                else if(decl.size() > nogilOnly.size() &&
+                        decl.compare(decl.size() - nogilOnly.size(), nogilOnly.size(), nogilOnly) == 0)
+                {
+                    decl.erase(decl.size() - nogilOnly.size());
+                    hadNogil = true;
+                }
+                else if(decl.size() > constOnly.size() &&
+                        decl.compare(decl.size() - constOnly.size(), constOnly.size(), constOnly) == 0)
+                {
+                    decl.erase(decl.size() - constOnly.size());
+                    hadConst = true;
+                }
+                // A `const` with no `nogil` to separate it has to go: there is
+                // no legal ordering of `const` and `except +` on their own.
+                decl += " except +";
+                if(hadNogil) decl += " nogil";
+                if(hadNogil && hadConst) decl += " const";
+                l = std::string(ind, ' ') + decl;
+            }
             rest.clear();
             for(const auto& l : lines) { rest += l; rest += "\n"; }
         }
@@ -1628,18 +2242,29 @@ private:
     {
         // `<letter>const`  -> `<letter> const`   (e.g. voidconst, Pointconst)
         // `const<letter>`  -> `const <letter>`   (e.g. constvoid)
-        for(std::string::size_type i = s.find("const"); i != std::string::npos; i = s.find("const", i + 1))
+        // The scan must respect WORD BOUNDARIES. Searching for "const" anywhere
+        // corrupted every identifier that merely contains it: `reconstruct`
+        // became `re ruct` (a space either side, then dropValueParamConst ate
+        // the middle), `constant_value` became `ant_value`, `const_pointer`
+        // became `const _pointer` — silently, in output cython then rejected.
+        // Only a glued KEYWORD is split, i.e. exactly one side is an
+        // identifier character; both sides means we are inside a longer name.
+        auto identChar = [](char c) {
+            return std::isalnum((unsigned char)c) != 0 || c == '_';
+        };
+        for(std::string::size_type i = s.find("const"); i != std::string::npos;
+            i = s.find("const", i + 1))
         {
-            if(i > 0 && (std::isalnum((unsigned char)s[i-1]) || s[i-1] == '_'))
-            {
-                s.insert(i, " ");
-                i++; // skip the inserted space
-            }
-            std::string::size_type after = i + 5; // length of "const"
-            if(after < s.size() && (std::isalnum((unsigned char)s[after]) || s[after] == '_'))
-            {
-                s.insert(after, " ");
-            }
+            bool prevIdent = i > 0 && identChar(s[i - 1]);
+            bool nextIdent = i + 5 < s.size() && identChar(s[i + 5]);
+            // Only the `<type>const` direction is splittable. `const<letter>`
+            // is genuinely ambiguous — `constvoid` and `constant_value` /
+            // `const_pointer` / `constructor` look identical from here — and
+            // splitting it corrupted the names: `constant_value` became
+            // `const ant_value` and then, via dropValueParamConst, `ant_value`.
+            // libclang prints the keyword before the type with a separator, so
+            // there is nothing real to recover on that side.
+            if(prevIdent && !nextIdent) { s.insert(i, " "); i++; }
         }
         // `)const` -> `) const`
         myReplace(s, ")const", ") const");
@@ -1681,6 +2306,87 @@ private:
         // (e.g. `from libcpp.string cimport string`). Strip the qualifier.
         myReplace(s, "std::", "");
         return s;
+    }
+
+    // Index of the '(' that opens the PARAMETER LIST of an emitted declaration,
+    // or npos when the line declares no callable. Brackets are tracked so a
+    // template argument (`vector[pair[int, int]] f(...)`) cannot be mistaken for
+    // one, and `operator()` is stepped over so its own parentheses do not read
+    // as the parameter list.
+    static std::string::size_type findParamListOpen(const std::string& t)
+    {
+        // NOTE: only square brackets are tracked. By the time this pass runs
+        // #33 has rewritten every template `<...>` to `[...]`, so the only `<`
+        // left in a declaration is an OPERATOR NAME — counting it as an open
+        // angle bracket made `operator<` and `operator<=` look like they had
+        // no parameter list at all, and they were then silently skipped while
+        // `operator>=` beside them got its `except +`.
+        int square = 0;
+        for(std::string::size_type i = 0; i < t.size(); ++i)
+        {
+            char c = t[i];
+            if(c == '[') ++square;
+            else if(c == ']') { if(square) --square; }
+            else if(c == '(' && square == 0)
+            {
+                static const std::string opWord = "operator";
+                std::string::size_type ow = i - opWord.size();
+                if(i >= opWord.size() &&
+                   t.compare(ow, opWord.size(), opWord) == 0 &&
+                   // ...and `operator` must START a token: without this,
+                   // `myoperator(int)` matched and was silently skipped.
+                   (ow == 0 || !(std::isalnum(static_cast<unsigned char>(t[ow - 1]))
+                                 || t[ow - 1] == '_')))
+                {
+                    // `operator()(args)`: skip this pair, the next '(' is it.
+                    std::string::size_type close = t.find(')', i);
+                    if(close == std::string::npos) return std::string::npos;
+                    i = close;
+                    continue;
+                }
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
+
+    // True when the declaration's RETURN TYPE is a non-const lvalue reference
+    // (`T&`), the case `except +` must not touch. The return type is whatever
+    // precedes the function name, so the name is consumed backwards from the
+    // parameter list: an optional `[T, ...]` member-template list, then the
+    // identifier (or an `operator` spelling with its symbols).
+    static bool returnsMutableReference(const std::string& t,
+                                        std::string::size_type paramOpen)
+    {
+        std::string::size_type i = paramOpen;
+        // member function template: `T& at[T](size_t)`
+        if(i > 0 && t[i - 1] == ']')
+        {
+            int depth = 0;
+            while(i > 0)
+            {
+                --i;
+                if(t[i] == ']') ++depth;
+                else if(t[i] == '[') { if(--depth == 0) break; }
+            }
+        }
+        // the name itself
+        while(i > 0 && (std::isalnum(static_cast<unsigned char>(t[i - 1])) ||
+                        t[i - 1] == '_' || t[i - 1] == '~'))
+            --i;
+        // an operator name carries symbols before the `operator` word
+        static const std::string opWord = "operator";
+        std::string::size_type j = i;
+        while(j > 0 && std::string("[]<>=!+-*/%&|^~()").find(t[j - 1]) != std::string::npos)
+            --j;
+        if(j >= opWord.size() && t.compare(j - opWord.size(), opWord.size(), opWord) == 0)
+            i = j - opWord.size();
+
+        std::string ret = t.substr(0, i);
+        while(!ret.empty() && (ret.back() == ' ' || ret.back() == '\t')) ret.pop_back();
+        if(ret.empty()) return false;              // constructor / destructor
+        if(ret.back() != '&') return false;
+        return ret.rfind("const ", 0) != 0;
     }
 
     // Move a `const` that qualifies a pointer/reference parameter type to the
@@ -2135,12 +2841,19 @@ private:
                     else if(tmpPunctuation == "<")
                     {
                         // テンプレート開始: Foo<...> -> Foo[...]
-                        typeRhs += "[";
+                        // Inside a function-pointer typedef's PARAMETER LIST
+                        // the brackets were dropped entirely, gluing the
+                        // argument onto the template name
+                        // (`shared_ptr<pcl::PointCloud<pcl::PointXYZ>>` came
+                        // out as `shared_ptrpcl::PointCloud[pcl::PointXYZ]`).
+                        if(isPunctuation) typeCallbackDefineName += "[";
+                        else              typeRhs += "[";
                     }
                     else if(tmpPunctuation == ">")
                     {
                         // テンプレート終了
-                        typeRhs += "]";
+                        if(isPunctuation) typeCallbackDefineName += "]";
+                        else              typeRhs += "]";
                     }
                     else
                     {
@@ -2903,7 +3616,8 @@ private:
             // 消費したテンプレート引数はクリアする（自由関数側と同じ規約）。
             pendingFunctionTemplateParams.clear();
 
-            classFunctionName += " nogil";
+            if(emitNogil)
+                classFunctionName += " nogil";
             // インデントを保護しつつ宣言本体の空白を整形する。
             classFunctionDef += normalizeDeclIndented(classFunctionName);
             classFunctionDef += "\n";
@@ -2917,6 +3631,11 @@ private:
             std::string enumTemplateDef = "";
             std::string generatorParam = "";
             std::string enumTypeName = "";
+            // #62: a scoped enum keeps its `class` — Cython 3 spells it
+            // `enum class Kind:` and references the enumerators as
+            // `Kind::X`; as a plain `enum` they would be emitted unscoped and
+            // fail at C++ compile time.
+            const bool scopedEnum = static_cast<const cppast::cpp_enum&>(e).is_scoped();
 
             enumTemplateDef += indentSpace;
 
@@ -2953,7 +3672,7 @@ private:
                 // class 内 enum 定義。Cython では cppclass 内のネスト enum は
                 // `enum Name:` と書く(`cdef` は付けない — 付けると構文エラー)。
                 // メンバは素の名前で列挙する。
-                enumTemplateDef += "enum";
+                enumTemplateDef += scopedEnum ? "enum class" : "enum";
                 if(!enumTypeName.empty())
                 {
                     enumTemplateDef += " ";
@@ -2966,7 +3685,7 @@ private:
             else
             {
                 // class 外定義
-                enumTemplateDef += "cdef enum";
+                enumTemplateDef += scopedEnum ? "cdef enum class" : "cdef enum";
                 if(enumTypeName.empty())
                 {
                     // None
@@ -3381,8 +4100,9 @@ private:
             // 消費したテンプレート引数はクリアする。
             pendingFunctionTemplateParams.clear();
 
-            // 末尾に nogil をつける。
-            functionName += " nogil";
+            // 末尾に nogil をつける。(--no_nogil で抑止できる。)
+            if(emitNogil)
+                functionName += " nogil";
             // インデントを保護しつつ宣言本体の空白を整形する。
             functionDef = normalizeDeclIndented(functionName);
             functionDef += "\n";

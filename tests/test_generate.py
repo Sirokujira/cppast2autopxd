@@ -283,3 +283,61 @@ def test_unknown_foreign_name_still_skips_with_warning():
     )
     assert "void feed(" not in result.text
     assert any("feed" in w for w in result.warnings), result.warnings
+
+
+def test_namespace_matching_nothing_warns(tmp_path):
+    """A --namespace that selects nothing is never silent: the pxd is
+    empty and a warning names the value, spelling the global namespace as
+    `::` — the C++ tool's exact wording, so a consumer greps one string
+    for either backend."""
+    hdr = tmp_path / "ns.hpp"
+    hdr.write_text("namespace demo { int f(); }\n")
+    result = generate_pxd(str(hdr), extern_from="ns.hpp", namespaces=["zzz"])
+    assert "cdef extern from" not in result.text
+    assert (
+        "--namespace 'zzz' matched no extern block in this header"
+        in result.warnings
+    )
+    # the global namespace holds no declaration here either
+    result = generate_pxd(
+        str(hdr), extern_from="ns.hpp", namespaces=["", "demo"]
+    )
+    assert "int f() except +" in result.text
+    assert (
+        "--namespace '::' matched no extern block in this header"
+        in result.warnings
+    )
+    # a name that does select something is quiet, and so is no filter
+    for namespaces in (["demo"], None):
+        result = generate_pxd(
+            str(hdr), extern_from="ns.hpp", namespaces=namespaces
+        )
+        assert not [w for w in result.warnings if "matched no" in w]
+
+    # "matched" means a block with declarations came out, not that the
+    # name exists: a namespace holding only a using-directive or an alias
+    # exports nothing and must warn like a typo would
+    hdr.write_text(
+        "namespace demo { int f(); }\n"
+        "namespace only_using { using namespace demo; }\n"
+        "namespace only_alias { namespace d = demo; }\n"
+    )
+    result = generate_pxd(
+        str(hdr), extern_from="ns.hpp", namespaces=["only_using", "only_alias"]
+    )
+    assert "cdef extern from" not in result.text
+    assert (
+        "--namespace 'only_using' matched no extern block in this header"
+        in result.warnings
+    )
+    assert (
+        "--namespace 'only_alias' matched no extern block in this header"
+        in result.warnings
+    )
+
+    # ... and the macro pass can supply the file-level block by itself, so
+    # the check runs after it: no false warning for `::` here
+    hdr.write_text("#define LIMIT 42\nnamespace demo { int f(); }\n")
+    result = generate_pxd(str(hdr), extern_from="ns.hpp", namespaces=[""])
+    assert "LIMIT = 42" in result.text
+    assert not [w for w in result.warnings if "matched no" in w]
