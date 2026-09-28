@@ -36,3 +36,17 @@ int other_fn(const Other& o);
 // one is kept -- an import line is never filtered out with a block.
 std::vector<int> other_ids(const Other& o);
 }  // namespace c
+
+// File-level declarations AFTER a namespace block (#60, was limitation 2e):
+// they must RE-OPEN the file-level extern block. Before the fix they were
+// appended to the `c` block above, so `trailing_count` linked as
+// `c::trailing_count` -- `--namespace c` kept it in the wrong place and
+// `--namespace ::` dropped it.
+int trailing_count();
+struct Trailing { int n; };
+
+// ... and a namespace re-opened after that: its header must be written
+// again, because the file-level re-open closed the previous block.
+namespace a {
+int outer_late(const Outer& o);
+}  // namespace a

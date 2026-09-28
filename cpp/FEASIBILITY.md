@@ -663,8 +663,29 @@ below: cross-header names (1b) and member function templates (1c).
 
     The two-backend parity gate also compared plain line SETS, which
     cannot see a declaration emitted in the wrong block. It now keys
-    every line by its extern block. That is what makes limitation 2e
-    below visible.
+    every line by its extern block. That is what made limitation 2e
+    visible (closed by #60).
+
+60. ~~A file-level declaration AFTER a namespace block landed inside
+    that block~~ (limitation 2e, found by the reviewer probing #58). The
+    file-level `cdef extern from "file":` header was written once, at
+    file start, and never re-opened after a namespace exit, so
+    `namespace a { ... } int after();` declared `after()` under
+    `namespace "a"`: Cython linked it as `a::after`, `--namespace a` kept
+    it in the wrong place and `--namespace ::` dropped it. → the header
+    emitter now tracks whether the open block is the file-level one and
+    re-opens it before the first file-level entity that follows a
+    namespace block (what the Python emitter already did); a namespace
+    re-opened after that gets its header again. `namespaces.h` carries
+    both shapes, and the gate asserts the header standing above each
+    trailing entity in every filtered run and the unfiltered one. None
+    of python-pcl_skbuild's 68 mirror headers has this shape, so the
+    committed pxd are unchanged.
+
+    The Python filter's silence on a no-match `--namespace` (the parity
+    follow-up #59 left) is closed in the same change: `parse_header`
+    records every namespace that reached the filter and warns, in the
+    C++ tool's exact wording, for each configured name it never saw.
 
 
 ### Compilation-database mode (real PCL, verified on Linux)
@@ -716,15 +737,9 @@ standard flag (`/std:` on MSVC, `-std=` elsewhere) so the toolchain that emits
    void*)` where the libclang emitter writes `(shared_ptr[Widget] w,
    void* user_data)`. Names in an extern declaration are documentation, so
    this is cosmetic.
-2e. **A file-level declaration AFTER a namespace block lands inside that
-   block.** `int before(); namespace a { ... } int after();` emits
-   `after()` under `cdef extern from "..." namespace "a":`, so Cython
-   would link it as `a::after` — and `--namespace ::` drops it while
-   `--namespace a` keeps it in the wrong place. Pre-existing (the
-   file-level header is emitted once, at file start, and never re-opened
-   after a namespace exit); the Python implementation places it
-   correctly. None of python-pcl_skbuild's 68 mirror headers has this
-   shape. Found by the reviewer probing #58.
+2e. ~~A file-level declaration AFTER a namespace block lands inside that
+    block~~ — fixed by #60; the file-level block is re-opened, on both
+    backends identically.
 2b. **No NAME filtering.** `--include-name` / `--exclude-name` have no
    counterpart flags here (namespace filtering does, since #58), so the
    Python `--backend cppast` path refuses them rather than degrading (as

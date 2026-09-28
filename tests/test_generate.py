@@ -283,3 +283,33 @@ def test_unknown_foreign_name_still_skips_with_warning():
     )
     assert "void feed(" not in result.text
     assert any("feed" in w for w in result.warnings), result.warnings
+
+
+def test_namespace_matching_nothing_warns(tmp_path):
+    """A --namespace that selects nothing is never silent: the pxd is
+    empty and a warning names the value, spelling the global namespace as
+    `::` — the C++ tool's exact wording, so a consumer greps one string
+    for either backend."""
+    hdr = tmp_path / "ns.hpp"
+    hdr.write_text("namespace demo { int f(); }\n")
+    result = generate_pxd(str(hdr), extern_from="ns.hpp", namespaces=["zzz"])
+    assert "cdef extern from" not in result.text
+    assert (
+        "--namespace 'zzz' matched no extern block in this header"
+        in result.warnings
+    )
+    # the global namespace holds no declaration here either
+    result = generate_pxd(
+        str(hdr), extern_from="ns.hpp", namespaces=["", "demo"]
+    )
+    assert "int f() except +" in result.text
+    assert (
+        "--namespace '::' matched no extern block in this header"
+        in result.warnings
+    )
+    # a name that does select something is quiet, and so is no filter
+    for namespaces in (["demo"], None):
+        result = generate_pxd(
+            str(hdr), extern_from="ns.hpp", namespaces=namespaces
+        )
+        assert not [w for w in result.warnings if "matched no" in w]

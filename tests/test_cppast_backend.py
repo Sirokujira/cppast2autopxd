@@ -396,10 +396,13 @@ def test_namespaces_filter_is_exact_match(tmp_path):
     only_a = generate_pxd_cppast(
         NAMESPACES_H, tool=_tool(), namespaces=["a"]
     ).text
-    assert only_a.count("cdef extern from") == 1
+    # `a` is opened twice: once more after the trailing file-level block
+    assert only_a.count("cdef extern from") == 2
     assert 'namespace "a":' in only_a
+    assert "int outer_late(const Outer& o)" in only_a
     assert 'namespace "a::b"' not in only_a
     assert "global_count" not in only_a
+    assert "trailing_count" not in only_a and "Trailing" not in only_a
     # a dropped block must not leak through a multi-line import expansion:
     # <stdint.h> is eight cimport lines with column-0 continuations, and
     # the file-level typedef right after them once reappeared headerless
@@ -418,9 +421,14 @@ def test_namespaces_filter_is_exact_match(tmp_path):
     only_global = generate_pxd_cppast(
         NAMESPACES_H, tool=_tool(), namespaces=[""]
     ).text
-    assert only_global.count("cdef extern from") == 1
+    # the file-level block is opened twice: at file start and again after
+    # `c` (#60) — before that the trailing declarations were dropped here
+    assert only_global.count("cdef extern from") == 2
     assert "int global_count()" in only_global
+    assert "int trailing_count()" in only_global
+    assert "cdef struct Trailing:" in only_global
     assert 'namespace "' not in only_global
+    assert "outer_late" not in only_global
 
     # an IMPORT is never dropped with a block: `c` is the only user of
     # vector, and the emitter interleaves that cimport with an earlier
@@ -430,6 +438,9 @@ def test_namespaces_filter_is_exact_match(tmp_path):
     ).text
     assert "from libcpp.vector cimport vector\n" in only_c
     assert "vector[int] other_ids(const Other& o)" in only_c
+    # #60: the file-level `trailing_count()` right after the `c` block was
+    # emitted INSIDE it, i.e. linked as c::trailing_count
+    assert "trailing_count" not in only_c and "Trailing" not in only_c
     _cython_ok(
         tmp_path, "namespaces_c", only_c.replace('"namespaces.h"', '"namespaces_c.h"'),
         "from namespaces_c cimport Other\n"
@@ -439,12 +450,53 @@ def test_namespaces_filter_is_exact_match(tmp_path):
     a_and_c = generate_pxd_cppast(
         NAMESPACES_H, tool=_tool(), namespaces=["a", "c"]
     ).text
-    assert a_and_c.count("cdef extern from") == 2
+    assert a_and_c.count("cdef extern from") == 3
+    assert "trailing_count" not in a_and_c
     _cython_ok(
         tmp_path, "namespaces", a_and_c,
         "from namespaces cimport Outer\n"
         "def f():\n    cdef Outer o\n    return o.v\n",
     )
+
+
+def _block_above(text, needle):
+    """The `cdef extern from` header standing above the first line that
+    contains *needle*, with the libclang emitter's ` nogil` suffix
+    removed so both backends' headers compare equal."""
+    header = None
+    for line in text.splitlines():
+        if line.startswith("cdef extern from"):
+            header = line.replace(" nogil:", ":")
+        elif needle in line:
+            assert header is not None, (needle, text)
+            return header
+    raise AssertionError(f"{needle!r} not emitted:\n{text}")
+
+
+def test_file_level_declaration_after_a_namespace_block():
+    """#60 (limitation 2e): the file-level extern block is re-opened for a
+    declaration that follows a namespace block, and a namespace re-opened
+    after that gets its header again — on both backends, identically."""
+    from cppast2autopxd import generate_pxd
+
+    cpp = generate_pxd_cppast(NAMESPACES_H, tool=_tool()).text
+    py = generate_pxd(NAMESPACES_H, extern_from="namespaces.h").text
+    file_level = 'cdef extern from "namespaces.h":'
+    expected = {
+        "int global_count()": file_level,
+        "int outer_fn(": 'cdef extern from "namespaces.h" namespace "a":',
+        "int inner_fn(": 'cdef extern from "namespaces.h" namespace "a::b":',
+        "int other_fn(": 'cdef extern from "namespaces.h" namespace "c":',
+        "int trailing_count()": file_level,
+        "cdef struct Trailing:": file_level,
+        "int outer_late(": 'cdef extern from "namespaces.h" namespace "a":',
+    }
+    for needle, block in expected.items():
+        assert _block_above(cpp, needle) == block, needle
+        assert _block_above(py, needle) == block, needle
+    # six blocks: file, a, a::b, c, file again, a again
+    assert cpp.count("cdef extern from") == 6
+    assert py.count("cdef extern from") == 6
 
 
 def test_run_config_through_cppast_backend(tmp_path):

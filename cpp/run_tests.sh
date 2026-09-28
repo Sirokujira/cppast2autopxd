@@ -298,7 +298,7 @@ fi
 # config-key route must agree with the flag.
 if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
   name="namespaces"
-  NS="$OUT/namespaces"; mkdir -p "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/nomatch" "$NS/confglobal"
+  NS="$OUT/namespaces"; mkdir -p "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/nomatch" "$NS/confglobal" "$NS/all"
   printf 'namespace = a\nnamespace = c\n' > "$NS/ac.conf"
   printf 'namespace = ::\n' > "$NS/global.conf"
   if "$TOOL" --output_dir "$NS/a" --xml_dir "" --std "$STD" --namespace a \
@@ -312,25 +312,38 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
      && "$TOOL" --output_dir "$NS/confglobal" --xml_dir "" --std "$STD" --config "$NS/global.conf" \
         "$ROOT/tests/input_options/namespaces.h" >"$NS/confglobal.log" 2>&1 \
      && "$TOOL" --output_dir "$NS/nomatch" --xml_dir "" --std "$STD" --namespace zzz \
-        "$ROOT/tests/input_options/namespaces.h" >"$NS/nomatch.log" 2>&1; then
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/nomatch.log" 2>&1 \
+     && "$TOOL" --output_dir "$NS/all" --xml_dir "" --std "$STD" \
+        "$ROOT/tests/input_options/namespaces.h" >"$NS/all.log" 2>&1; then
     a="$NS/a/namespaces.pxd"; g="$NS/global/namespaces.pxd"; c="$NS/conf/namespaces.pxd"
     bad=""
-    [[ "$(grep -c '^cdef extern from' "$a")" == 1 ]] || bad="$bad a-block-count"
+    # `a` is opened twice (once more after the trailing file-level block)
+    [[ "$(grep -c '^cdef extern from' "$a")" == 2 ]] || bad="$bad a-block-count"
     grep -q 'namespace "a":$' "$a" || bad="$bad a-kept"
+    grep -q 'int outer_late(const Outer& o) nogil$' "$a" || bad="$bad a-late-kept"
     grep -q 'namespace "a::b"' "$a" && bad="$bad a-nested-leaked"
     grep -q 'int global_count' "$a" && bad="$bad a-global-leaked"
-    [[ "$(grep -c '^cdef extern from' "$g")" == 1 ]] || bad="$bad global-block-count"
+    grep -q 'trailing_count\|Trailing' "$a" && bad="$bad a-trailing-leaked"
+    # the file-level block is opened twice: at file start and again after `c`
+    [[ "$(grep -c '^cdef extern from' "$g")" == 2 ]] || bad="$bad global-block-count"
     grep -q 'int global_count() nogil$' "$g" || bad="$bad global-kept"
+    grep -q 'int trailing_count() nogil$' "$g" || bad="$bad global-trailing-kept"
+    grep -q 'cdef struct Trailing:$' "$g" || bad="$bad global-trailing-struct-kept"
     grep -q 'namespace "' "$g" && bad="$bad global-namespaced-leaked"
-    [[ "$(grep -c '^cdef extern from' "$c")" == 2 ]] || bad="$bad conf-block-count"
+    grep -q 'outer_late' "$g" && bad="$bad global-late-leaked"
+    [[ "$(grep -c '^cdef extern from' "$c")" == 3 ]] || bad="$bad conf-block-count"
     grep -q 'namespace "a":$' "$c" && grep -q 'namespace "c":$' "$c" || bad="$bad conf-a-c"
     grep -q 'namespace "a::b"' "$c" && bad="$bad conf-nested-leaked"
+    grep -q 'trailing_count' "$c" && bad="$bad conf-trailing-leaked"
     # an IMPORT line is never dropped with a block: `c` uses vector, and the
     # emitter interleaved that cimport with an earlier (dropped) block
     cc="$NS/c/namespaces.pxd"
     grep -q '^from libcpp.vector cimport vector$' "$cc" || bad="$bad c-lost-cimport"
     grep -q 'vector\[int\] other_ids(const Other& o) nogil$' "$cc" || bad="$bad c-kept"
     [[ "$(grep -c '^cdef extern from' "$cc")" == 1 ]] || bad="$bad c-block-count"
+    # #60 (limitation 2e): the file-level `trailing_count()` right after the
+    # `c` block used to be emitted INSIDE it, i.e. linked as c::trailing_count
+    grep -q 'trailing_count\|Trailing' "$cc" && bad="$bad c-trailing-leaked"
     # a dropped block must not LEAK through a multi-line import expansion:
     # <stdint.h> expands to eight cimport lines whose continuations sit at
     # column 0; the file-level typedef right after them must not reappear
@@ -340,8 +353,19 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
     grep -q '^from libc.stdint cimport uint32_t$' "$a" || bad="$bad a-import-lost"
     # `namespace = ::` in a CONFIG means the file-level block too
     cg="$NS/confglobal/namespaces.pxd"
-    [[ "$(grep -c '^cdef extern from' "$cg")" == 1 ]] || bad="$bad confglobal-block-count"
+    [[ "$(grep -c '^cdef extern from' "$cg")" == 2 ]] || bad="$bad confglobal-block-count"
     grep -q 'ctypedef uint32_t index_t$' "$cg" || bad="$bad confglobal-kept"
+    grep -q 'int trailing_count() nogil$' "$cg" || bad="$bad confglobal-trailing-kept"
+    # unfiltered: six blocks (file, a, a::b, c, file again, a again), and the
+    # header standing above each trailing entity is the right one
+    al="$NS/all/namespaces.pxd"
+    [[ "$(grep -c '^cdef extern from' "$al")" == 6 ]] || bad="$bad all-block-count"
+    [[ "$(awk '/^cdef extern from/{h=$0} /int trailing_count\(\)/{print h}' "$al")" == "cdef extern from \"namespaces.h\":" ]] \
+      || bad="$bad all-trailing-block"
+    [[ "$(awk '/^cdef extern from/{h=$0} /cdef struct Trailing:/{print h}' "$al")" == "cdef extern from \"namespaces.h\":" ]] \
+      || bad="$bad all-trailing-struct-block"
+    [[ "$(awk '/^cdef extern from/{h=$0} /int outer_late\(/{print h}' "$al")" == "cdef extern from \"namespaces.h\" namespace \"a\":" ]] \
+      || bad="$bad all-late-block"
     # a --namespace that selects nothing is never silent
     grep -q "warning: --namespace 'zzz' matched no extern block" "$NS/nomatch.log" \
       || bad="$bad nomatch-silent"
@@ -350,16 +374,16 @@ if [[ -f "$ROOT/tests/input_options/namespaces.h" ]]; then
       printf 'NG    %-24s unexpected emission:%s\n' "$name" "$bad"; status=1
     elif [[ -n "$CYTHON" && "$CYTHON" != "skip" && -x "$CYTHON" ]]; then
       ok=1
-      for d in "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/confglobal"; do
+      for d in "$NS/a" "$NS/global" "$NS/conf" "$NS/c" "$NS/confglobal" "$NS/all"; do
         ( cd "$d" && "$CYTHON" --cplus namespaces.pxd ) >"$d/cython.log" 2>&1 || ok=0
       done
       if [[ $ok -eq 1 ]]; then
-        printf 'OK    %-24s a / c / global / a+c via config  [cython OK]\n' "$name"
+        printf 'OK    %-24s a / c / global / a+c via config / unfiltered  [cython OK]\n' "$name"
       else
         printf 'NG    %-24s [cython FAIL -> %s]\n' "$name" "$NS"; status=1
       fi
     else
-      printf 'OK    %-24s a / c / global / a+c via config  [cython skipped]\n' "$name"
+      printf 'OK    %-24s a / c / global / a+c via config / unfiltered  [cython skipped]\n' "$name"
     fi
   else
     printf 'NG    %-24s generation failed\n' "$name"; status=1

@@ -241,6 +241,13 @@ def parse_header(path: str, options: ParseOptions, mapper: TypeMapper) -> ir.Mod
 
     lowering = _Lowering(module, options, mapper, main_abs)
     lowering.visit_children(tu.cursor, namespace="")
+    # A --namespace that selects nothing used to yield an empty pxd with
+    # exit 0.  Same wording as the C++ tool so a consumer greps one string.
+    for ns in options.namespaces:
+        if ns not in lowering.seen_namespaces:
+            module.warnings.append(
+                f"--namespace '{ns or '::'}' matched no extern block in this header"
+            )
     if options.macros:
         _collect_macro_constants(tu, module, main_abs)
     return module
@@ -309,6 +316,11 @@ class _Lowering:
         # type mapper so bare identifiers only resolve against what this pxd
         # really declares (plus cimports/substitutions).
         self.declared: Set[str] = mapper.known_names
+        # Every namespace that reached the filter, i.e. had at least one
+        # declaration in the main file ("" for the global one).  Compared
+        # against the configured list afterwards so a name that selects
+        # nothing is never silent (parity with the C++ tool's warning).
+        self.seen_namespaces: Set[str] = set()
 
     # ------------------------------------------------------------ traversal
     def visit_children(self, cursor, namespace: str) -> None:
@@ -330,6 +342,7 @@ class _Lowering:
             self.visit_children(cursor, inner)
             return
 
+        self.seen_namespaces.add(namespace)
         if not self._namespace_selected(namespace):
             return
 

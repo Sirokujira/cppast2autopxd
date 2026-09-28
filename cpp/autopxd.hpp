@@ -247,18 +247,25 @@ public:
         bool container_start = true;
         bool isIndentCountUp = false;
 
+        // Whether the block currently open in refLines is the FILE-LEVEL one
+        // (`cdef extern from "file":`, written once at file start). A
+        // namespace header closes it; a file-level entity after that has to
+        // re-open it (#60).
+        bool fileLevelBlockOpen = true;
+
         // Emit the `cdef extern from "file" namespace "ns::...":` header once,
         // before the first top-level entity inside a namespace. This must run
         // whether that entity is the last child or not (a namespace containing a
         // single class takes the last_child path), so it is shared by both
         // container_entity_enter branches below.
         auto emitNamespaceHeader = [&]() {
+            if(!container_start) return;
             // Build from currentNamespaceNames (outermost first, kept in sync
             // by the namespace enter/exit events below). The old code drained
             // namespaceStack, which reversed nested namespaces into
             // "traits::pcl" AND emptied the stack, so siblings after a nested
             // namespace lost their qualification entirely.
-            if(!currentNamespaceNames.empty() && container_start)
+            if(!currentNamespaceNames.empty())
             {
                 std::string headerRef = "\n";
                 headerRef += "cdef extern from \"" + header_name + "\" namespace \"";
@@ -269,6 +276,22 @@ public:
                 }
                 headerRef += "\":\n";
                 refLines.push_back(headerRef);
+                fileLevelBlockOpen = false;
+                container_start = false;
+            }
+            else if(!fileLevelBlockOpen)
+            {
+                // #60: a file-level entity AFTER a namespace block. Before
+                // this branch it was appended to whatever block was open
+                // last -- the namespace's -- so `int after();` following
+                // `namespace a { ... }` was declared under `namespace "a"`
+                // and Cython linked it as `a::after` (limitation 2e). The
+                // Python emitter re-opens the file-level block here; do the
+                // same. (At file start the block is already open, so nothing
+                // is emitted twice; an empty re-opened block cannot arise
+                // because this only runs right before an entity is written.)
+                refLines.push_back("\ncdef extern from \"" + header_name + "\":\n");
+                fileLevelBlockOpen = true;
                 container_start = false;
             }
         };

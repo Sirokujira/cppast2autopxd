@@ -52,6 +52,11 @@ pyx_scaffold.py (IR -> starting-point .pyx; never overwrites, always
   means. Unknown tails still raise.
 - The parser retries with the canonical spelling before giving up
   (`uindex_t` -> `unsigned int`).
+- `--namespace` is an EXACT match (`pcl` does not cover `pcl::io`), and a
+  value that selects nothing WARNS (`--namespace 'x' matched no extern
+  block in this header`, the C++ tool's wording) instead of yielding an
+  empty pxd silently. The global namespace is spelled `""` in the API and
+  reported as `'::'`.
 
 ## Environment
 
